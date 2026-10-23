@@ -1,11 +1,12 @@
 import type { Plugin } from "@opencode/plugin"
 import { setTimeout as delay } from "node:timers/promises"
 import { cachePath, readCache, writeCache } from "./cache.js"
-import { buildModels, buildProviderInfo, catalogFingerprint } from "./catalog.js"
+import { buildModels, buildProviderInfo, catalogFingerprint, imageModels } from "./catalog.js"
 import { parseConfig, resolveConfig, type Config } from "./config.js"
 import { fetchCatalog, type CPACatalog } from "./cpa-client.js"
+import { createImageTool } from "./image-tool.js"
 
-type Context = Pick<Plugin.Context, "options" | "provider" | "integration" | "event">
+type Context = Pick<Plugin.Context, "options" | "provider" | "integration" | "event" | "tool" | "location">
 interface Dependencies {
   env?: NodeJS.ProcessEnv
   cachePath?: string
@@ -41,6 +42,8 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   let disposed = false
   let fetching = false
   let registered = false
+  let toolRegistered = false
+  let imageFingerprint = "[]"
   let controller: AbortController | undefined
   let primary: CPACatalog | undefined
   let pendingRefresh = false
@@ -93,6 +96,15 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     }
   }
 
+  async function reloadImages(): Promise<void> {
+    const next = JSON.stringify(catalog ? imageModels(catalog) : [])
+    if (next === imageFingerprint) return
+    imageFingerprint = next
+    if (!disposed && toolRegistered) {
+      try { await ctx.tool.reload() } catch { log("圖片工具重新載入失敗。") }
+    }
+  }
+
   async function refresh(reload: boolean): Promise<void> {
     if (disposed || fetching) return
     fetching = true
@@ -121,6 +133,8 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
         fingerprint = catalogFingerprint(cached ? buildModels(cached, config) : [])
         writtenFingerprint = cached ? catalogFingerprint(cached.models) : undefined
         if (cached) cachedReady()
+        await reloadImages()
+        if (!current()) return
         // 切換來源後只發布新網址的快取；沒有快取時移除舊 provider。
         if (registered) await ctx.provider.reload()
       }
@@ -136,7 +150,8 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       const changed = nextFingerprint !== fingerprint
       catalog = next
       fingerprint = nextFingerprint
-      if (disposed) return
+      await reloadImages()
+      if (!current()) return
       const cacheFingerprint = catalogFingerprint(next.models)
       if (writtenFingerprint !== cacheFingerprint) {
         const task = writing = (dependencies.writeCache ?? writeCache)(next, requestPath)
@@ -213,6 +228,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
         timer = setTimeout(() => {
           if (primary && catalog === null) {
             catalog = primary
+            void reloadImages()
             fingerprint = catalogFingerprint(buildModels(primary, config))
           } else if (!primary) controller?.abort()
           resolve()
@@ -227,6 +243,20 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     if (models.length) editor.add({ info: buildProviderInfo(config), models })
   })
   registered = true
+  const toolRegistration = await ctx.tool.transform((editor) => {
+    if (disposed || !catalog || !imageModels(catalog).length) return
+    editor.add(createImageTool({
+      directory: ctx.location.directory,
+      models: () => catalog ? imageModels(catalog) : [],
+      settings: async () => {
+        const settings = await connectionSettings()
+        return settings.type === "error" ? undefined : settings
+      },
+      fetch: dependencies.fetch,
+    }))
+  })
+  toolRegistered = true
+  await reloadImages()
   const schedule = dependencies.setInterval ?? setInterval
   const cancel = dependencies.clearInterval ?? clearInterval
   const timer = config.refreshIntervalMinutes > 0
@@ -242,6 +272,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     await watching
     await writing?.catch(() => {})
     await registration.dispose()
+    await toolRegistration.dispose()
     await integration.dispose()
   }
 }

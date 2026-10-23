@@ -42,6 +42,24 @@ async function fixture(t: TestContext, cached?: string) {
   let fails = false
   let gate: Promise<void> | undefined
   let cleanup: Plugin.Cleanup | void
+  type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
+  let toolCallback: Parameters<Plugin.Context["tool"]["transform"]>[0] | undefined
+  let tools: Parameters<ToolEditor["add"]>[0][] = []
+  let toolReloads = 0
+  let toolDisposed = false
+  function replayTools() {
+    tools = []
+    toolCallback?.({ add(input) { tools.push(input) } } as ToolEditor)
+  }
+  const tool = {
+    async transform(cb) {
+      toolCallback = cb
+      replayTools()
+      return { async dispose() { toolDisposed = true; toolCallback = undefined; tools = [] } }
+    },
+    async reload() { toolReloads++; replayTools() },
+  } as Plugin.Context["tool"]
+  const location = { directory } as Plugin.Context["location"]
   const logs: string[] = []
   const options = { baseURL: "http://localhost:8317/v1", refreshIntervalMinutes: 1 }
   let added: Parameters<Editor["add"]>[0][] = []
@@ -134,7 +152,10 @@ async function fixture(t: TestContext, cached?: string) {
   }
   t.after(async () => { await cleanup?.(); await rm(directory, { recursive: true, force: true }) })
   return {
-    path, options, dependencies, provider, integration, event, logs, statuses,
+    path, options, dependencies, provider, integration, event, logs, statuses, tool, location,
+    get tools() { return tools },
+    get toolReloads() { return toolReloads },
+    get toolDisposed() { return toolDisposed },
     get integrationDisposed() { return integrationDisposed },
     get subscribed() { return subscribed },
     set key(value: string | undefined) { key = value },
@@ -151,7 +172,7 @@ async function fixture(t: TestContext, cached?: string) {
     set fails(value: boolean) { fails = value },
     set gate(value: Promise<void> | undefined) { gate = value },
     tick() { tick?.() },
-    async start() { cleanup = await setup({ options, provider, integration, event }, dependencies) },
+    async start() { cleanup = await setup({ options, provider, integration, event, tool, location }, dependencies) },
     async stop() { const stop = cleanup; cleanup = undefined; await stop?.() },
     added() { return added },
   }
@@ -248,7 +269,7 @@ test("cleanup 停止 interval、dispose registration，忽略晚到結果", asyn
 test("設定讀取錯誤時不丟錯、不註冊、不輸出例外內容", async (t) => {
   const f = await fixture(t)
   const options = { get baseURL(): string { throw new Error("sensitive-setting") } }
-  assert.equal(await setup({ options, provider: f.provider, integration: f.integration, event: f.event }, f.dependencies), undefined)
+  assert.equal(await setup({ options, provider: f.provider, integration: f.integration, event: f.event, tool: f.tool, location: f.location }, f.dependencies), undefined)
   assert.equal(f.registered, false)
   assert.equal(f.requests, 0)
   assert.equal(f.logs.length, 1)
@@ -821,4 +842,102 @@ test("default reasoning metadata 改變但 variants 相同時，仍更新快取�
   f.tick()
   await until(async () => (await readCache(f.path))?.models[0].default_reasoning_level === "high")
   assert.equal(f.reloads, 0)
+})
+
+function imageCatalog(f: Awaited<ReturnType<typeof fixture>>, ids: () => string[]) {
+  f.dependencies.fetch = async (url) => Response.json(String(url).includes("v1beta")
+    ? { models: ids().map((id) => ({ name: `models/${id}`, supportedOutputModalities: ["text", "image"] })) }
+    : { data: [{ id: "chat", owned_by: "antigravity" }, ...ids().map((id) => ({ id, owned_by: "antigravity" }))] })
+}
+
+test("有圖片模型才新增 tool；清單變更才 reload，cleanup dispose", async (t) => {
+  const f = await fixture(t)
+  let ids: string[] = []
+  imageCatalog(f, () => ids)
+  await f.start()
+  assert.deepEqual(f.tools, [])
+  ids = ["z-image", "a-image"]
+  f.tick()
+  await until(() => f.toolReloads === 1)
+  assert.equal(f.tools[0].name, "cpa_generate_image")
+  await until(async () => (await readCache(f.path))?.models.length === 3)
+  assert.deepEqual(f.added()[0].models.map((model) => model.id), ["chat"])
+  ids.reverse()
+  f.tick()
+  await delay(30)
+  assert.equal(f.toolReloads, 1)
+  ids = []
+  f.tick()
+  await until(() => f.toolReloads === 2)
+  assert.deepEqual(f.tools, [])
+  await f.stop()
+  assert.equal(f.toolDisposed, true)
+})
+
+test("冷啟動 primary fallback 後 metadata 補上圖片模型時 reload tool", async (t) => {
+  const f = await fixture(t)
+  const gate = deferred()
+  f.dependencies.coldStartBudgetMs = 10
+  imageCatalog(f, () => ["image-model"])
+  const fetch = f.dependencies.fetch
+  f.dependencies.fetch = async (url, init) => {
+    if (String(url).includes("v1beta")) await gate.promise
+    return fetch(url, init)
+  }
+  await f.start()
+  assert.deepEqual(f.tools, [])
+  gate.resolve()
+  await until(() => f.toolReloads === 1)
+  assert.equal(f.tools[0].name, "cpa_generate_image")
+})
+
+test("來源切換到無圖片快取且離線時移除 tool", async (t) => {
+  const f = await fixture(t)
+  imageCatalog(f, () => ["image-model"])
+  await f.start()
+  assert.equal(f.tools.length, 1)
+  assert.equal(f.toolReloads, 0)
+  credentialURL(f, () => "https://offline-image.example")
+  f.dependencies.fetch = async () => new Response(null, { status: 503 })
+  f.emit("cpa")
+  await until(() => f.toolReloads === 1)
+  assert.deepEqual(f.tools, [])
+})
+
+test("tool reload 失敗只記固定訊息，不洩漏例外或 key", async (t) => {
+  const f = await fixture(t)
+  let ids = ["image-a"]
+  imageCatalog(f, () => ids)
+  await f.start()
+  f.tool.reload = async () => { throw new Error("test-only-key sensitive-reload") }
+  ids = ["image-b"]
+  f.tick()
+  await until(() => f.logs.length === 1)
+  assert.deepEqual(f.logs, ["圖片工具重新載入失敗。"])
+})
+
+test("註冊的 tool execute 重讀 active key 與網址、成功存檔，失敗不洩漏 key", async (t) => {
+  const f = await fixture(t)
+  imageCatalog(f, () => ["image-model"])
+  const catalogFetch = f.dependencies.fetch
+  let fail = false
+  f.dependencies.fetch = async (url, init) => {
+    if (!String(url).endsWith(":generateContent")) return catalogFetch(url, init)
+    assert.equal(url, "https://image.example/v1beta/models/image-model:generateContent")
+    assert.equal(new Headers(init?.headers).get("x-goog-api-key"), "new-image-key")
+    return fail ? new Response("new-image-key remote-error", { status: 400 })
+      : Response.json({ candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/jpeg", data: "aGVsbG8=" } }] } }] })
+  }
+  await f.start()
+  f.integration.connection.active = async () => ({ type: "credential", id: Credential.ID.make("image-key"), label: "CPA", method: "key" })
+  f.integration.connection.resolve = async () => ({ type: "key", key: "new-image-key", metadata: { cpaBaseURL: "https://image.example/v1" } })
+  const registered = f.tools[0]
+  const context = { signal: new AbortController().signal } as Parameters<typeof registered.execute>[1]
+  const result = await registered.execute({ prompt: "draw" }, context)
+  assert.equal(await readFile(join(f.location.directory, result.metadata!.path), "utf8"), "hello")
+  assert.doesNotMatch(JSON.stringify(result.metadata), /new-image-key|apiKey/)
+  fail = true
+  await assert.rejects(registered.execute({ prompt: "draw" }, context), { message: "CPA image request failed: HTTP 400" })
+  f.integration.connection.resolve = async () => { throw new Error("new-image-key") }
+  await assert.rejects(registered.execute({ prompt: "draw" }, context), { message: "CPA image connection is unavailable" })
 })
