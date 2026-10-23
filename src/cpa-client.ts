@@ -51,6 +51,7 @@ export function isCatalog(value: unknown): value is CPACatalog {
 }
 
 export async function fetchCatalog(config: Config, dependencies: {
+  apiKey?: string
   fetch?: typeof fetch
   signal?: AbortSignal
   previous?: CPACatalog | null
@@ -61,7 +62,7 @@ export async function fetchCatalog(config: Config, dependencies: {
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(config.timeoutMs), ...(dependencies.signal ? [dependencies.signal] : [])])
   async function get(path: string, anthropic = false): Promise<unknown> {
     const headers: Record<string, string> = { Accept: "application/json" }
-    if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`
+    if (dependencies.apiKey) headers.Authorization = `Bearer ${dependencies.apiKey}`
     if (anthropic) headers["anthropic-version"] = "2023-06-01"
     try {
       const response = await request(`${config.baseURL}${path}`, {

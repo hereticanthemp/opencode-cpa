@@ -1,6 +1,5 @@
 export interface Config {
   baseURL: string
-  apiKey?: string
   refreshIntervalMinutes: number
   timeoutMs: number
 }
@@ -33,10 +32,8 @@ export function parseConfig(
   // 無效型別略過該來源；有效數字若超出範圍，直接使用預設值。
   const refresh = number(options.refreshIntervalMinutes) ?? number(env.CPA_REFRESH_INTERVAL_MINUTES, true) ?? 10
   const timeout = number(options.timeoutMs) ?? 10_000
-  const apiKey = nonempty(options.apiKey) ?? nonempty(env.CPA_API_KEY)
   return {
     baseURL: baseURL(options.baseURL) ?? baseURL(env.CPA_BASE_URL) ?? "http://127.0.0.1:8317",
-    ...(apiKey ? { apiKey } : {}),
     refreshIntervalMinutes: refresh === 0 || (refresh >= 1 / 60_000 && refresh <= 2_147_483_647 / 60_000) ? refresh : 10,
     timeoutMs: Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 2_147_483_647 ? timeout : 10_000,
   }

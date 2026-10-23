@@ -11,10 +11,10 @@ test("config 使用預設值，且 API key 可省略", () => {
 test("config 優先使用 options，再使用環境變數", () => {
   const env = { CPA_BASE_URL: "http://env:1234/v1/", CPA_API_KEY: "env-key", CPA_REFRESH_INTERVAL_MINUTES: "20" }
   assert.deepEqual(parseConfig({}, env), {
-    baseURL: "http://env:1234", apiKey: "env-key", refreshIntervalMinutes: 20, timeoutMs: 10_000,
+    baseURL: "http://env:1234", refreshIntervalMinutes: 20, timeoutMs: 10_000,
   })
   assert.deepEqual(parseConfig({ baseURL: "http://option:1234/v1beta///", apiKey: "option-key", refreshIntervalMinutes: 0, timeoutMs: 500 }, env), {
-    baseURL: "http://option:1234", apiKey: "option-key", refreshIntervalMinutes: 0, timeoutMs: 500,
+    baseURL: "http://option:1234", refreshIntervalMinutes: 0, timeoutMs: 500,
   })
 })
 
@@ -27,7 +27,7 @@ test("config 驗證 options 型別並正規化根網址", () => {
     CPA_BASE_URL: "https://env/v1", CPA_API_KEY: "env-key", CPA_REFRESH_INTERVAL_MINUTES: "3.5",
   })
   assert.equal(config.baseURL, "https://env")
-  assert.equal(config.apiKey, "env-key")
+  assert.equal("apiKey" in config, false)
   assert.equal(config.refreshIntervalMinutes, 3.5)
   assert.equal(config.timeoutMs, 10_000)
 })

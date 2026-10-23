@@ -38,7 +38,7 @@ test("fetchCatalog 平行抓取三個來源，正確帶入認證與 timeout", as
     assert.equal(headers.get("anthropic-version"), null)
     return json(google)
   }
-  const catalog = await fetchCatalog({ ...config, apiKey: "test-key" }, { fetch: request })
+  const catalog = await fetchCatalog(config, { apiKey: "test-key", fetch: request })
   assert.deepEqual(started, ["/v1/models", "/v1/models:anthropic", "/v1beta/models"])
   assert.equal(new Set(signals).size, 1)
   assert.equal(catalog.models.length, 9)

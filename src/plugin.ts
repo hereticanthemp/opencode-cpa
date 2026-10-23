@@ -3,9 +3,8 @@ import { cachePath, readCache, writeCache } from "./cache.js"
 import { buildModels, buildProviderInfo, catalogFingerprint } from "./catalog.js"
 import { parseConfig, type Config } from "./config.js"
 import { fetchCatalog, type CPACatalog } from "./cpa-client.js"
-import { authenticate } from "./auth.js"
 
-type Context = Pick<Plugin.Context, "options" | "provider" | "session">
+type Context = Pick<Plugin.Context, "options" | "provider" | "integration" | "event">
 interface Dependencies {
   env?: NodeJS.ProcessEnv
   cachePath?: string
@@ -38,17 +37,39 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   let registered = false
   let controller: AbortController | undefined
   let primary: CPACatalog | undefined
-  const authentication = await ctx.session.hook("http.request", (event) => {
-    if (!disposed) authenticate(event.request, config)
-  }, { providerID: "cpa" })
+  let pendingRefresh = false
+  const integration = await ctx.integration.transform((editor) => {
+    editor.update("cpa", (value) => { value.name = "CLIProxyAPI" })
+    editor.method.update({ integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key" } })
+    editor.method.update({ integrationID: "cpa", method: { type: "env", names: ["CPA_API_KEY"] } })
+  })
+
+  async function apiKey(): Promise<string | undefined> {
+    try {
+      const connection = await ctx.integration.connection.active("cpa")
+      const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
+      return credential?.type === "key" ? credential.key : undefined
+    } catch {
+      return undefined
+    }
+  }
 
   async function refresh(reload: boolean): Promise<void> {
     if (disposed || fetching) return
     fetching = true
     controller = new AbortController()
+    const signal = controller.signal
+    primary = undefined
     try {
+      // connection 讀取也受冷啟動與 cleanup 的 signal 限制；晚到的 key 不啟動請求。
+      const key = await new Promise<string | undefined>((resolve, reject) => {
+        const abort = () => reject(signal.reason)
+        signal.addEventListener("abort", abort, { once: true })
+        void apiKey().then(resolve).finally(() => signal.removeEventListener("abort", abort))
+      })
+      signal.throwIfAborted()
       const next = await fetchCatalog(config, {
-        fetch: dependencies.fetch, signal: controller.signal, previous: catalog,
+        apiKey: key, fetch: dependencies.fetch, signal, previous: catalog,
         onPrimary: (value) => { primary = value },
       })
       if (disposed) return
@@ -66,6 +87,10 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       if (!disposed) log("模型更新失敗；保留目前的模型目錄。")
     } finally {
       fetching = false
+      if (pendingRefresh && !disposed) {
+        pendingRefresh = false
+        void refresh(true)
+      }
     }
   }
 
@@ -92,6 +117,19 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     if (models.length) editor.add({ info: buildProviderInfo(config), models })
   })
   registered = true
+  const events = new AbortController()
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: events.signal })) {
+        // Updated 沒有 integrationID；Switched 涵蓋新增、啟用與移除 active credential。
+        if (disposed || event.type !== "credential.switched" || event.data.integrationID !== "cpa") continue
+        if (fetching) pendingRefresh = true
+        else void refresh(true)
+      }
+    } catch {
+      if (!disposed) log("認證事件訂閱中斷；模型目錄仍會定期更新。")
+    }
+  })()
   if (cached) void refresh(true)
   const schedule = dependencies.setInterval ?? setInterval
   const cancel = dependencies.clearInterval ?? clearInterval
@@ -102,9 +140,10 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
 
   return async () => {
     disposed = true
+    events.abort()
     controller?.abort()
     if (timer) cancel(timer)
-    await authentication.dispose()
     await registration.dispose()
+    await integration.dispose()
   }
 }

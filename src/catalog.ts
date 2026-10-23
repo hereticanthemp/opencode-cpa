@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { Model, Provider } from "@opencode/schema"
+import { Integration, Model, Provider } from "@opencode/schema"
 import type { Config } from "./config.js"
 import type { CPACatalog } from "./cpa-client.js"
 
@@ -12,13 +12,12 @@ const providerID = Provider.ID.make("cpa")
 export function buildProviderInfo(config: Config): Provider.Info {
   return {
     id: providerID,
+    integrationID: Integration.ID.make("cpa"),
     name: "CLIProxyAPI",
     activation: "enabled",
     package: channels.antigravity.package,
     settings: {
       baseURL: `${config.baseURL}${channels.antigravity.path}`,
-      // 防止 Google provider 讀取 GOOGLE_GENERATIVE_AI_API_KEY；真正認證只在 HTTP hook 注入。
-      apiKey: "cpa",
     },
   }
 }

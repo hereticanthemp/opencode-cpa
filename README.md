@@ -18,7 +18,8 @@
 ## 安裝
 
 注意事項：
-- API key 建議用環境變數 `CPA_API_KEY` 提供，不要寫進設定檔。
+- 在 opencode／OpenChamber 的 provider 連線畫面為 CLIProxyAPI 輸入 API key，或設定環境變數 `CPA_API_KEY`。
+- CPA 沒有設定 `api-keys` 時，不需要 API key。不要把 key 寫進 plugin options。
 - 改程式後要重新 `npm run build`。
 
 步驟：
@@ -47,7 +48,6 @@
 | option 名稱 | 環境變數 | 預設值 | 說明 |
 | --- | --- | --- | --- |
 | `baseURL` | `CPA_BASE_URL` | `http://127.0.0.1:8317` | CPA 伺服器網址。 |
-| `apiKey` | `CPA_API_KEY` | 無 | CPA 的 API key。 |
 | `refreshIntervalMinutes` | `CPA_REFRESH_INTERVAL_MINUTES` | `10` | 模型列表更新間隔（分鐘）。`0` 停用。 |
 | `timeoutMs` | （無） | `10000` | 網路請求逾時時間（毫秒）。 |
 
@@ -55,7 +55,6 @@
 
 - 優先順序：options 優先於環境變數。無效型別略過該來源，退回後續來源或預設值。
 - `baseURL` 正規化：只接受 HTTP 或 HTTPS 網址。不接受內嵌認證、query 或 hash。程式會自動移除結尾斜線，並移除結尾的 `/v1` 或 `/v1beta`。
-- `apiKey` 正規化：移除前後空白。空字串不採用。
 - `refreshIntervalMinutes`：環境變數支援字串轉數字。換算後必須介於 1 到 2,147,483,647 毫秒。超出範圍時退回預設值 10 分鐘。設為 0 表示停用定時更新。
 - `timeoutMs`：無環境變數，只從 options 讀取。只接受 1 到 2,147,483,647 的安全正整數。超出範圍或型別無效時退回預設值 10000。
 
@@ -75,10 +74,13 @@ CPA 端點用途：
 - Google 格式 `/v1beta/models`：補充模型的 modalities（輸入與輸出支援能力）。
 
 認證：
-- provider settings 只存非機密的 `apiKey: "cpa"` 佔位字串，避免 Google provider 讀取 `GOOGLE_GENERATIVE_AI_API_KEY`。
-- 真正的 API key 只由限定 `cpa` 的 `http.request` hook 注入。hook 只修改 origin 與 CPA baseURL 相同的最終 Request。
-- 未設定 CPA API key 時，hook 移除認證佔位標頭，不注入認證。
-- API key 不會加入 provider、model 或 variant 的 settings 與 headers。
+- plugin 註冊 `cpa` integration，名稱為 CLIProxyAPI。支援 API key 與 `CPA_API_KEY` 環境變數。
+- opencode credential 機制負責保存與套用 key。已儲存的 credential 優先於環境變數。
+- session 與 stateless generation 都由 opencode 在執行時套用認證。
+- 每次更新模型列表前，plugin 都重新讀取 active connection。讀取失敗或沒有 key 時，不帶認證。
+- 新增、啟用或移除 `cpa` 的 active credential 時，plugin 會更新模型列表。
+- API key 不會進入公開模型資料、provider settings 或模型快取。
+- 沒有 CPA credential 時，opencode 不會套用 `GOOGLE_GENERATIVE_AI_API_KEY`。
 
 cache 機制：
 - cache 位置為 `$XDG_DATA_HOME/opencode-cpa/models-<source>.json`。未設定環境變數時，目錄為 `~/.local/share/opencode-cpa`。
@@ -91,7 +93,7 @@ cache 機制：
 
 啟動與請求生命週期：
 - 有快取時立即註冊，並在背景更新。
-- 無快取時最多等待 3 秒，且不超過 `timeoutMs`。主來源成功後可先使用預設 metadata。
+- 無快取時最多等待 3 秒，且不超過 `timeoutMs`。此預算包含 connection 讀取。主來源成功後可先使用預設 metadata。
 - metadata 超出啟動預算時，背景請求繼續補充資料。資料改變後會 reload provider。
 - 主來源在預算內失敗或未完成時，先註冊空 transform，再由定期更新重試。若更新間隔為 0，則不會重試。
 - 主來源失敗時中止其他請求，等請求全部結束後才允許下次更新。cleanup 也會中止進行中的請求。
