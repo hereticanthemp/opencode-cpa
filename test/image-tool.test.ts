@@ -46,16 +46,26 @@ test("tool 預設存檔、建立 gitignore，以 data URI 回傳且 metadata 沒
 })
 
 test("tool 自訂路徑依 mime 補上或更換副檔名，不建立 gitignore，不覆寫", async (t) => {
-  for (const [mime, ext] of [["image/jpeg", "jpg"], ["image/webp", "webp"], ["application/octet-stream", "bin"]]) {
+  for (const [mime, ext] of [["image/jpeg", "jpg"], ["image/webp", "webp"], [" IMAGE/PNG ; charset=binary", "png"]]) {
     const f = await fixture(t, mime)
     for (const path of ["assets/output", "assets/other.png"]) {
       const result = await f.execute({ prompt: "draw", path })
       assert.equal(result.metadata?.path, `${path.replace(/\.png$/, "")}.${ext}`)
+      assert.equal(result.metadata?.mime, mime.split(";", 1)[0].trim().toLowerCase())
     }
     assert.deepEqual((await readdir(join(f.directory, "assets"))).sort(), [`other.${ext}`, `output.${ext}`])
     await assert.rejects(f.execute({ prompt: "draw", path: "assets/output" }), { message: "CPA image output already exists; choose a different path" })
     assert.equal(await readFile(join(f.directory, `assets/output.${ext}`), "utf8"), "image bytes")
   }
+})
+
+test("tool 拒絕以斜線或反斜線結尾的輸入與輸出路徑", async (t) => {
+  const f = await fixture(t)
+  for (const path of ["assets/", "assets\\", "image.png/", "image.png\\"]) {
+    await assert.rejects(f.execute({ prompt: "x", path }), { message: "CPA image path must name a file" })
+    await assert.rejects(f.execute({ prompt: "x", images: [path] }), { message: "CPA image path must name a file" })
+  }
+  assert.equal(f.calls, 0)
 })
 
 test("tool 參考圖片支援 PNG、JPEG、WebP 與大小寫副檔名", async (t) => {

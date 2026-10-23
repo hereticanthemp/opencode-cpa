@@ -35,6 +35,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   let path: string | undefined
   let catalog: CPACatalog | null = null
   let fingerprint = catalogFingerprint([])
+  let publishedFingerprint: string | undefined
   let writtenFingerprint: string | undefined
   let generation = 0
   let cachedReady!: () => void
@@ -99,10 +100,11 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   async function reloadImages(): Promise<void> {
     const next = JSON.stringify(catalog ? imageModels(catalog) : [])
     if (next === imageFingerprint) return
-    imageFingerprint = next
-    if (!disposed && toolRegistered) {
-      try { await ctx.tool.reload() } catch { log("圖片工具重新載入失敗。") }
-    }
+    if (disposed) return
+    try {
+      if (toolRegistered) await ctx.tool.reload()
+      imageFingerprint = next
+    } catch { log("圖片工具重新載入失敗。") }
   }
 
   async function refresh(reload: boolean): Promise<void> {
@@ -147,7 +149,6 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       })
       if (!current()) return
       const nextFingerprint = catalogFingerprint(buildModels(next, requestConfig))
-      const changed = nextFingerprint !== fingerprint
       catalog = next
       fingerprint = nextFingerprint
       await reloadImages()
@@ -162,7 +163,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
           if (writing === task) writing = undefined
         }
       }
-      if (current() && (reload || registered) && changed) await ctx.provider.reload()
+      if (current() && (reload || registered) && fingerprint !== publishedFingerprint) await ctx.provider.reload()
     } catch {
       if (!disposed && revision === generation) log("模型更新失敗；保留目前來源的模型快取，沒有快取時不註冊 provider。")
     } finally {
@@ -238,9 +239,11 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     clearTimeout(timer)
   }
   const registration = await ctx.provider.transform((editor) => {
-    if (disposed || !catalog) return
-    const models = buildModels(catalog, config)
+    if (disposed) return
+    const models = catalog ? buildModels(catalog, config) : []
     if (models.length) editor.add({ info: buildProviderInfo(config), models })
+    // 只有 transform 實際讀取並發布的內容，才算已發布。
+    publishedFingerprint = catalogFingerprint(models)
   })
   registered = true
   const toolRegistration = await ctx.tool.transform((editor) => {

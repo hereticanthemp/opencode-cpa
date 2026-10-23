@@ -916,6 +916,71 @@ test("tool reload 失敗只記固定訊息，不洩漏例外或 key", async (t) 
   assert.deepEqual(f.logs, ["圖片工具重新載入失敗。"])
 })
 
+test("tool reload 首次失敗後，相同 catalog 的 refresh 會重試成功", async (t) => {
+  const f = await fixture(t)
+  let ids = ["image-a"]
+  imageCatalog(f, () => ids)
+  await f.start()
+  const reload = f.tool.reload
+  let attempts = 0
+  f.tool.reload = async () => {
+    if (++attempts === 1) throw new Error("sensitive-reload")
+    await reload()
+  }
+  ids = ["image-b"]
+  f.tick()
+  await until(async () => (await readCache(f.path))?.models.some((model) => model.id === "image-b") === true)
+  assert.equal(attempts, 1)
+  f.tick()
+  await until(() => attempts === 2)
+  assert.equal(f.toolReloads, 1)
+  f.tick()
+  await delay(30)
+  assert.equal(attempts, 2)
+})
+
+for (const stage of ["tool reload", "writeCache"]) {
+  test(`${stage} 等待期間切換 credential，補跑 refresh 仍發布新 catalog`, async (t) => {
+    const f = await fixture(t)
+    let updated = false
+    let signal: AbortSignal | null | undefined
+    f.dependencies.fetch = async (url, init) => {
+      signal = init?.signal
+      const id = updated ? "new-chat" : "old-chat"
+      const image = updated ? "new-image" : "old-image"
+      return Response.json(String(url).includes("v1beta")
+        ? { models: [{ name: `models/${image}`, supportedOutputModalities: ["image"] }] }
+        : { data: [{ id, owned_by: "antigravity" }, { id: image, owned_by: "antigravity" }] })
+    }
+    await f.start()
+    assert.equal(f.added()[0].models[0].id, "old-chat")
+    const gate = deferred()
+    let waiting = false
+    if (stage === "tool reload") {
+      const reload = f.tool.reload
+      f.tool.reload = async () => { waiting = true; await gate.promise; await reload() }
+    } else {
+      f.dependencies.writeCache = async (catalog, path) => {
+        waiting = true
+        await gate.promise
+        return writeCache(catalog, path)
+      }
+    }
+    updated = true
+    f.tick()
+    await until(() => waiting)
+    f.key = "switched-key"
+    f.emit("cpa")
+    await until(() => signal?.aborted === true)
+    gate.resolve()
+    await until(() => f.added()[0]?.models[0]?.id === "new-chat")
+    assert.equal(f.reloads, 1)
+    f.tick()
+    await delay(30)
+    assert.equal(f.reloads, 1)
+  })
+}
+
 test("註冊的 tool execute 重讀 active key 與網址、成功存檔，失敗不洩漏 key", async (t) => {
   const f = await fixture(t)
   imageCatalog(f, () => ["image-model"])

@@ -128,6 +128,7 @@ opencode 2.1.3 Core 不保存模型直接輸出的圖片。因此，圖片模型
 - 使用預設目錄時，tool 會建立內容為 `*` 的 `.gitignore`。既有 `.gitignore` 不會覆寫。
 - 要保留的圖片，請要求聊天模型移到專案的正式位置，再納入版本控制。
 - 自訂 `path` 不建立 `.gitignore`。輸入與輸出都不得逃出工作目錄，也不得經過 `.git`。
+- 輸出只接受 PNG、JPEG、WebP。單張圖片解碼後的大小上限為 32 MB（33,554,432 bytes）。
 - tool 預設使用圖片模型 id 排序後的第一個。可用 `imageModel` 或 `CPA_IMAGE_MODEL` 指定模型。
 - 每次執行都重新讀取 active connection 的 key 與有效 CPA URL。圖片請求逾時時間為 120 秒，不使用 catalog 的 `timeoutMs`。
 - 圖片 base64 會存進 session 資料庫。刪除工作目錄的圖片檔案，不會移除 session 內的圖片資料。

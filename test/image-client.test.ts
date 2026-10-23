@@ -51,7 +51,7 @@ test("image client 沒有圖片時附 finishReason 與最多 500 字元的非 th
   await assert.rejects(generateImage(config, request, { fetch: async () => Response.json({ candidates: [{
     finishReason: "SAFETY", content: { parts: [{ text: "hidden", thought: true }, { ...image, thought: true }, { text: "x".repeat(600) }] },
   }] }) }), { message: `CPA image response contains no image (SAFETY): ${"x".repeat(500)}` })
-  for (const value of [null, {}, { candidates: [] }, { candidates: [{ content: { parts: [null, {}, { inlineData: { data: 1 } }] } }] }]) {
+  for (const value of [null, {}, { candidates: [] }, { candidates: [{ content: { parts: [null, {}] } }] }]) {
     await assert.rejects(generateImage(config, request, { fetch: async () => Response.json(value) }), { message: "CPA image response contains no image" })
   }
   await assert.rejects(generateImage(config, request, { apiKey: "private-key", fetch: async () => Response.json({ candidates: [{ content: { parts: [{ text: "private-key" }] } }] }) }),
@@ -84,5 +84,54 @@ test("image client 等待回應 body 時仍受逾時與外部 signal 限制", as
       } })),
     })
     await assert.rejects(pending, external ? { name: "AbortError" } : { message: "CPA image request timed out" })
+  }
+})
+
+test("image client 正規化輸出 mime，只接受 PNG、JPEG、WebP", async () => {
+  for (const mime of [" IMAGE/PNG ; charset=binary ", "Image/JPEG", " image/webp "]) {
+    const result = await generateImage(config, request, { fetch: async () => Response.json({ candidates: [{ content: { parts: [
+      { inlineData: { mimeType: mime, data: image.inlineData.data } },
+    ] } }] }) })
+    assert.equal(result.mime, mime.split(";", 1)[0].trim().toLowerCase())
+  }
+  for (const mime of ["image/gif", "image/svg+xml", "application/octet-stream", "private-key", "", "  ", undefined, 1]) {
+    await assert.rejects(generateImage(config, request, { apiKey: "private-key", fetch: async () => Response.json({ candidates: [{ content: { parts: [
+      { inlineData: { mimeType: mime, data: image.inlineData.data } },
+    ] } }] }) }), { message: "CPA image response has an unsupported image type" })
+  }
+})
+
+test("image client 驗證標準 base64 字元、長度與結尾 padding", async () => {
+  const generate = (data: unknown) => generateImage(config, request, { apiKey: "private-key", fetch: async () => Response.json({ candidates: [{ content: { parts: [
+    { inlineData: { mimeType: "image/png", data } },
+  ] } }] }) })
+  for (const data of ["AA==", "AAA=", "AAAA", "+/8="]) assert.equal((await generate(data)).data, data)
+  for (const data of ["", undefined, 1, "AAA", "AAAAA", "A===", "AA=A", "=AAA", "AA-_", "AA\n=", "AA =", "AAA\n", "AAAA\n", "private-key"]) {
+    await assert.rejects(generate(data), { message: "CPA image response has invalid base64 data" })
+  }
+})
+
+test("image client 輸出大小接受 32 MB 邊界，拒絕超過上限", async () => {
+  const maximum = 32 * 1024 * 1024
+  const generate = (bytes: number) => {
+    const padding = bytes % 3 === 1 ? "==" : bytes % 3 === 2 ? "=" : ""
+    const data = "A".repeat(Math.ceil(bytes / 3) * 4 - padding.length) + padding
+    return generateImage(config, request, { fetch: async () => Response.json({ candidates: [{ content: { parts: [
+      { inlineData: { mimeType: "image/png", data } },
+    ] } }] }) })
+  }
+  for (const bytes of [maximum - 1, maximum]) {
+    const result = await generate(bytes)
+    assert.equal(Buffer.byteLength(result.data, "base64"), bytes)
+  }
+  await assert.rejects(generate(maximum + 1), { message: "CPA image response exceeds 32 MB" })
+})
+
+test("image client 只回傳合法 finishReason，保留拒絕文字上限與 key redact", async () => {
+  for (const finishReason of ["STOP", "A".repeat(64), "", "A".repeat(65), "stop", "STOP_1", "STOP\n", "private-key"]) {
+    const valid = /^[A-Z_]{1,64}$/.exec(finishReason)?.[0] === finishReason
+    await assert.rejects(generateImage(config, request, { apiKey: "private-key", fetch: async () => Response.json({ candidates: [{
+      finishReason, content: { parts: [{ text: `private-key${"x".repeat(600)}` }] },
+    }] }) }), { message: `CPA image response contains no image${valid ? ` (${finishReason})` : ""}: ${`[redacted]${"x".repeat(600)}`.slice(0, 500)}` })
   }
 })

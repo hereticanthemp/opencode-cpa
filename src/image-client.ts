@@ -53,14 +53,22 @@ export async function generateImage(config: Config, request: ImageRequest, depen
     const content = record(candidate) && record(candidate.content) ? candidate.content : undefined
     const parts = content && Array.isArray(content.parts) ? content.parts.filter((part: unknown) => record(part) && part.thought !== true) : []
     const text = parts.flatMap((part) => typeof part.text === "string" ? [part.text] : []).join("").trim()
-    const image = parts.map((part) => part.inlineData).filter((data: unknown) => record(data)
-      && typeof data.mimeType === "string" && data.mimeType && typeof data.data === "string" && data.data).at(-1)
+    const image = parts.map((part) => part.inlineData).filter(record).at(-1)
     if (!image) {
       const redact = (value: string) => dependencies.apiKey ? value.replaceAll(dependencies.apiKey, "[redacted]") : value
-      const finish = record(candidate) && typeof candidate.finishReason === "string" ? ` (${redact(candidate.finishReason)})` : ""
+      const finish = record(candidate) && typeof candidate.finishReason === "string" && /^[A-Z_]{1,64}$/.exec(candidate.finishReason)?.[0] === candidate.finishReason
+        ? ` (${redact(candidate.finishReason)})` : ""
       throw new Error(`CPA image response contains no image${finish}${text ? `: ${redact(text).slice(0, 500)}` : ""}`)
     }
-    return { mime: image.mimeType as string, data: image.data as string, ...(text ? { text } : {}) }
+    const mime = typeof image.mimeType === "string" ? image.mimeType.split(";", 1)[0].trim().toLowerCase() : ""
+    if (!["image/png", "image/jpeg", "image/webp"].includes(mime)) throw new Error("CPA image response has an unsupported image type")
+    const data = image.data
+    if (typeof data !== "string" || data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(data) || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+      throw new Error("CPA image response has invalid base64 data")
+    }
+    const bytes = data.length / 4 * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0)
+    if (bytes > 32 * 1024 * 1024) throw new Error("CPA image response exceeds 32 MB")
+    return { mime, data, ...(text ? { text } : {}) }
   }
   try {
     return await Promise.race([cancelled, run()])

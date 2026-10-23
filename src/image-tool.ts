@@ -24,6 +24,7 @@ function inside(root: string, path: string): void {
   }
 }
 function localPath(root: string, path: string): string {
+  if (/[\\/]$/.test(path)) fail("CPA image path must name a file")
   if (!path.trim() || path.includes("\0") || isAbsolute(path) || path.split(/[\\/]/).includes(".git")) {
     fail("CPA image paths must be relative and cannot contain .git")
   }
