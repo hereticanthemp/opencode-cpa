@@ -916,6 +916,29 @@ test("tool reload 失敗只記固定訊息，不洩漏例外或 key", async (t) 
   assert.deepEqual(f.logs, ["圖片工具重新載入失敗。"])
 })
 
+test("來源切換的 tool reload 等待期間再次切換，新來源離線時仍移除舊 provider", async (t) => {
+  const f = await fixture(t)
+  imageCatalog(f, () => ["image-a"])
+  await f.start()
+  assert.equal(f.added()[0].models[0].id, "chat")
+  const gate = deferred()
+  let waiting = false
+  const reload = f.tool.reload
+  f.tool.reload = async () => { waiting = true; await gate.promise; await reload() }
+  credentialURL(f, () => "https://offline-b.example")
+  f.dependencies.fetch = async () => new Response(null, { status: 503 })
+  f.emit("cpa")
+  await until(() => waiting)
+  f.emit("cpa")
+  gate.resolve()
+  await until(() => f.logs.length >= 1)
+  assert.deepEqual(f.added(), [])
+  f.tick()
+  await until(() => f.logs.length >= 2)
+  assert.deepEqual(f.added(), [])
+  assert.deepEqual(f.tools, [])
+})
+
 test("tool reload 首次失敗後，相同 catalog 的 refresh 會重試成功", async (t) => {
   const f = await fixture(t)
   let ids = ["image-a"]

@@ -135,11 +135,13 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
         fingerprint = catalogFingerprint(cached ? buildModels(cached, config) : [])
         writtenFingerprint = cached ? catalogFingerprint(cached.models) : undefined
         if (cached) cachedReady()
-        await reloadImages()
-        if (!current()) return
         // 切換來源後只發布新網址的快取；沒有快取時移除舊 provider。
         if (registered) await ctx.provider.reload()
+        if (!current()) return
+        await reloadImages()
       }
+      // 先前的發布可能被中止；送出請求前補發布目前來源的狀態，新來源離線時也不留下舊 provider。
+      if (current() && registered && fingerprint !== publishedFingerprint) await ctx.provider.reload()
       if (!current()) return
       const requestConfig = config
       const requestPath = path!
