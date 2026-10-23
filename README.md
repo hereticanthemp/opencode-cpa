@@ -21,7 +21,8 @@
 - 在 OpenChamber／opencode 的 provider 連線畫面為 CLIProxyAPI 同時填入 API key 與 CPA URL。
 - CPA 沒有設定 `api-keys` 時，key 欄位填任意非空字串。不要把 key 寫進 plugin options。
 - 也可透過 `CPA_API_KEY` 與 `CPA_BASE_URL` 環境變數設定，不建立 credential。
-- 改程式後要重新 `npm run build`。
+- 改程式後要重新 `npm run build`。opencode 會監看 plugin 檔案並自動重新載入，所以 `build` 不先刪除 `dist/`；要清掉舊檔時，先關閉 opencode，再執行 `npm run clean && npm run build`。
+- opencode 2.1.3 的已知問題：某個專案目錄第一次使用時，plugin 還沒載入完成就按下 Save key，會出現 `Integration not found: cpa`。再按一次即可。原因是 `integration.connect.key` 沒有等待 plugin 載入（`integration.list` 有等待）。
 
 步驟：
 1. 安裝相依套件：
