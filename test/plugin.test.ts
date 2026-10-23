@@ -4,7 +4,7 @@ import { join } from "node:path"
 import test, { type TestContext } from "node:test"
 import { setTimeout as delay } from "node:timers/promises"
 import type { Plugin } from "@opencode/plugin"
-import { readCache, writeCache } from "../src/cache.js"
+import { cachePath, readCache, writeCache } from "../src/cache.js"
 import { buildModels, buildProviderInfo } from "../src/catalog.js"
 import { parseConfig } from "../src/config.js"
 import { setup } from "../src/plugin.js"
@@ -27,7 +27,7 @@ async function until(check: () => boolean | Promise<boolean>) {
 
 async function fixture(t: TestContext, cached?: string) {
   const directory = await mkdtemp(join(process.cwd(), "test/.plugin-test-"))
-  const path = join(directory, "opencode-cpa/models.json")
+  const path = cachePath({ XDG_DATA_HOME: directory }, undefined, "http://localhost:8317")
   if (cached) await writeCache({ models: [{ id: cached, owned_by: "antigravity" }] }, path)
   let callback: Parameters<Plugin.Context["provider"]["transform"]>[0] | undefined
   let tick: (() => void) | undefined
@@ -46,7 +46,10 @@ async function fixture(t: TestContext, cached?: string) {
     async transform(cb: typeof callback) { callback = cb; return { async dispose() { disposals++ } } },
     async reload() { reloads++ },
   } as Plugin.Context["provider"]
+  const session = { async hook() { return { async dispose() {} } } } as unknown as Plugin.Context["session"]
   const dependencies = {
+    coldStartBudgetMs: 3_000,
+    writeCache,
     env: { XDG_DATA_HOME: directory },
     log: (message: string) => { logs.push(message) },
     fetch: (async () => {
@@ -63,7 +66,7 @@ async function fixture(t: TestContext, cached?: string) {
   }
   t.after(async () => { await cleanup?.(); await rm(directory, { recursive: true, force: true }) })
   return {
-    path, options, dependencies, provider, logs,
+    path, options, dependencies, provider, session, logs,
     get registered() { return Boolean(callback) },
     get reloads() { return reloads },
     get requests() { return requests },
@@ -74,7 +77,7 @@ async function fixture(t: TestContext, cached?: string) {
     set fails(value: boolean) { fails = value },
     set gate(value: Promise<void> | undefined) { gate = value },
     tick() { tick?.() },
-    async start() { cleanup = await setup({ options, provider }, dependencies) },
+    async start() { cleanup = await setup({ options, provider, session }, dependencies) },
     async stop() { const stop = cleanup; cleanup = undefined; await stop?.() },
     added() {
       const added: Parameters<Editor["add"]>[0][] = []
@@ -115,7 +118,7 @@ test("無快取時等待抓取、寫快取，transform 產出正確設定與模�
   assert.deepEqual(f.added(), [{ info: buildProviderInfo(config), models: buildModels(catalog, config) }])
   const { info, models } = f.added()[0]
   assert.equal(info.package, "@opencode/ai/providers/google")
-  assert.equal(info.settings?.apiKey, f.options.apiKey)
+  assert.equal(info.settings?.apiKey, "cpa")
   assert.equal(info.settings?.baseURL, "http://localhost:8317/v1beta")
   assert.equal(models[0].package, "@opencode/ai/providers/google")
   assert.deepEqual(models[0].settings, { baseURL: "http://localhost:8317/v1beta" })
@@ -174,7 +177,7 @@ test("cleanup 停止 interval、dispose registration，忽略晚到結果", asyn
 test("設定讀取錯誤時不丟錯、不註冊、不輸出例外內容", async (t) => {
   const f = await fixture(t)
   const options = { get baseURL(): string { throw new Error("sensitive-setting") } }
-  assert.equal(await setup({ options, provider: f.provider }, f.dependencies), undefined)
+  assert.equal(await setup({ options, provider: f.provider, session: f.session }, f.dependencies), undefined)
   assert.equal(f.registered, false)
   assert.equal(f.requests, 0)
   assert.equal(f.logs.length, 1)
@@ -186,4 +189,117 @@ test("更新間隔為 0 時不排程", async (t) => {
   f.options.refreshIntervalMinutes = 0
   await f.start()
   assert.equal(f.unrefs, 0)
+})
+
+test("冷啟動只等待預算，主來源成功時先發布，metadata 完成後 reload", async (t) => {
+  const f = await fixture(t)
+  const gate = deferred()
+  f.dependencies.coldStartBudgetMs = 25
+  f.dependencies.fetch = async (url, init) => {
+    if (new Headers(init?.headers).has("anthropic-version") || String(url).includes("v1beta")) {
+      await gate.promise
+      return Response.json(String(url).includes("v1beta")
+        ? { models: [{ name: "models/a", supportedInputModalities: ["text", "image"] }] }
+        : { data: [{ id: "a", display_name: "補充名稱", max_tokens: 100 }] })
+    }
+    return Response.json({ data: [{ id: "a", owned_by: "antigravity" }] })
+  }
+  const before = Date.now()
+  await f.start()
+  assert.ok(Date.now() - before < 500)
+  assert.equal(f.added()[0].models[0].name, "a")
+  assert.deepEqual(f.added()[0].models[0].capabilities.input, ["text"])
+  gate.resolve()
+  await until(() => f.reloads === 1)
+  assert.equal(f.added()[0].models[0].name, "補充名稱")
+  assert.deepEqual(f.added()[0].models[0].capabilities.input, ["image", "text"])
+})
+
+test("冷啟動主來源超出預算時中止請求並註冊空 transform", async (t) => {
+  const f = await fixture(t)
+  f.dependencies.coldStartBudgetMs = 20
+  let aborted = 0
+  f.dependencies.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => { aborted++; reject(init.signal?.reason) }, { once: true })
+  })
+  await f.start()
+  assert.deepEqual(f.added(), [])
+  await until(() => aborted === 3)
+  assert.equal(f.reloads, 0)
+})
+
+test("相同 catalog 在快取寫入失敗後重試，不重複 reload", async (t) => {
+  const f = await fixture(t)
+  let writes = 0
+  f.dependencies.writeCache = async (catalog, path) => {
+    writes++
+    return writes === 1 ? false : writeCache(catalog, path)
+  }
+  await f.start()
+  assert.equal(writes, 1)
+  assert.equal(await readCache(f.path), null)
+  f.tick()
+  await until(() => writes === 2)
+  await until(async () => (await readCache(f.path)) !== null)
+  assert.equal(f.reloads, 0)
+})
+
+test("cleanup 中止背景請求，且 HTTP hook 限定 cpa 並 dispose", async (t) => {
+  const f = await fixture(t, "cached")
+  let aborted = 0
+  let hookDisposed = false
+  let callback: ((event: { request: Request }) => unknown) | undefined
+  f.session.hook = (async (name: string, cb: typeof callback, filter: unknown) => {
+    assert.equal(name, "http.request")
+    assert.deepEqual(filter, { providerID: "cpa" })
+    callback = cb
+    return { async dispose() { hookDisposed = true } }
+  }) as Plugin.Context["session"]["hook"]
+  f.dependencies.fetch = async (_url, init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => { aborted++; reject(init.signal?.reason) }, { once: true })
+  })
+  await f.start()
+  const request = new Request("http://localhost:8317/v1beta/models/a", { headers: { "x-goog-api-key": "cpa" } })
+  callback?.({ request })
+  assert.equal(request.headers.get("x-goog-api-key"), "test-only-key")
+  await f.stop()
+  await until(() => aborted === 3)
+  assert.equal(hookDisposed, true)
+  assert.equal(f.reloads, 0)
+})
+
+test("冷啟動快取寫入較慢時，不把完整 metadata 降成預設值", async (t) => {
+  const f = await fixture(t)
+  const gate = deferred()
+  f.dependencies.coldStartBudgetMs = 20
+  f.dependencies.fetch = async () => Response.json({ data: [{ id: "a", owned_by: "antigravity", display_name: "完整名稱" }] })
+  f.dependencies.writeCache = async (catalog, path) => {
+    await gate.promise
+    return writeCache(catalog, path)
+  }
+  await f.start()
+  assert.equal(f.added()[0].models[0].name, "完整名稱")
+  gate.resolve()
+  await until(async () => (await readCache(f.path))?.models[0].display_name === "完整名稱")
+})
+
+test("定期更新 metadata 失敗時沿用上次資料，不降級圖片能力", async (t) => {
+  const f = await fixture(t)
+  let unavailable = false
+  f.dependencies.fetch = async (url, init) => {
+    const google = String(url).includes("v1beta")
+    const anthropic = new Headers(init?.headers).has("anthropic-version")
+    if (unavailable && (google || anthropic)) throw new Error("offline")
+    return Response.json(google
+      ? { models: [{ name: "models/a", supportedInputModalities: ["text", "image"] }] }
+      : { data: [{ id: "a", owned_by: "antigravity", display_name: "名稱", max_input_tokens: 100, max_tokens: 20 }] })
+  }
+  await f.start()
+  const before = f.added()
+  unavailable = true
+  f.tick()
+  await delay(30)
+  assert.deepEqual(f.added(), before)
+  assert.equal(f.reloads, 0)
+  assert.deepEqual(f.added()[0].models[0].capabilities.input, ["image", "text"])
 })

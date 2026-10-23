@@ -15,7 +15,7 @@ function baseURL(value: unknown): string | undefined {
   try {
     const url = new URL(text)
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return
-    return text.replace(/\/+$/, "").replace(/\/(v1|v1beta)$/, "")
+    return url.toString().replace(/\/+$/, "").replace(/\/(v1|v1beta)$/, "")
   } catch {
     return
   }
@@ -37,7 +37,7 @@ export function parseConfig(
   return {
     baseURL: baseURL(options.baseURL) ?? baseURL(env.CPA_BASE_URL) ?? "http://127.0.0.1:8317",
     ...(apiKey ? { apiKey } : {}),
-    refreshIntervalMinutes: refresh >= 0 ? refresh : 10,
-    timeoutMs: Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 4_294_967_295 ? timeout : 10_000,
+    refreshIntervalMinutes: refresh === 0 || (refresh >= 1 / 60_000 && refresh <= 2_147_483_647 / 60_000) ? refresh : 10,
+    timeoutMs: Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 2_147_483_647 ? timeout : 10_000,
   }
 }

@@ -40,7 +40,7 @@ test("fetchCatalog 平行抓取三個來源，正確帶入認證與 timeout", as
   }
   const catalog = await fetchCatalog({ ...config, apiKey: "test-key" }, { fetch: request })
   assert.deepEqual(started, ["/v1/models", "/v1/models:anthropic", "/v1beta/models"])
-  assert.equal(new Set(signals).size, 3)
+  assert.equal(new Set(signals).size, 1)
   assert.equal(catalog.models.length, 9)
   assert.deepEqual(catalog.models.find((model) => model.id === "claude-opus-5-5-high")?.input, ["text", "image"])
   assert.equal(catalog.models.some((model) => model.id.includes("fable")), false)
@@ -182,4 +182,42 @@ test("Anthropic 網路、HTTP、JSON、結構與欄位錯誤使用預設名稱�
     }
     assert.deepEqual(models.find((model) => model.id === "gemini-3-flash")?.capabilities.input, ["audio", "image", "text", "video"])
   }
+})
+
+test("metadata 暫時失敗保留同 id 的已知欄位，但不保留刪除的模型或渠道", async () => {
+  const previous = { models: [
+    { id: "a", owned_by: "other", display_name: "名稱", max_input_tokens: 100, max_tokens: 20, input: ["text", "image"], output: ["text"] },
+    { id: "deleted", input: ["image"] },
+  ] }
+  const catalog = await fetchCatalog(config, { previous, fetch: async (url, init) => {
+    if (isAnthropic(init) || String(url).includes("v1beta")) throw new Error("offline")
+    return json({ data: [{ id: "a", owned_by: "antigravity" }, { id: "new", owned_by: "antigravity" }] })
+  } })
+  assert.deepEqual(catalog.models[0], { ...previous.models[0], owned_by: "antigravity" })
+  assert.deepEqual(catalog.models[1], { id: "new", owned_by: "antigravity" })
+})
+
+test("主來源失敗時中止 metadata，等待所有請求結束後才 reject", async () => {
+  let completed = 0
+  const request: typeof fetch = async (url, init) => {
+    if (!isAnthropic(init) && !String(url).includes("v1beta")) return new Response(null, { status: 503 })
+    await pending(url, init).catch(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      completed++
+    })
+    throw new Error("aborted")
+  }
+  await assert.rejects(fetchCatalog(config, { fetch: request }), /HTTP 503/)
+  assert.equal(completed, 2)
+})
+
+test("外部 signal 中止所有進行中的請求", async () => {
+  const controller = new AbortController()
+  let aborted = 0
+  const task = fetchCatalog(config, { signal: controller.signal, fetch: async (url, init) => {
+    try { return await pending(url, init) } finally { aborted++ }
+  } })
+  controller.abort()
+  await assert.rejects(task)
+  assert.equal(aborted, 3)
 })

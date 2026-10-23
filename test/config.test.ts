@@ -46,3 +46,14 @@ test("config 拒絕無效網址、負數、非數字與無效 timeout", () => {
     assert.equal(parseConfig({ timeoutMs: value }, {}).timeoutMs, 10_000)
   }
 })
+
+test("timer 毫秒值限制在 1 到 signed 32-bit 最大值，0 只停用 interval", () => {
+  const maximum = 2_147_483_647
+  assert.equal(parseConfig({ timeoutMs: maximum }, {}).timeoutMs, maximum)
+  assert.equal(parseConfig({ timeoutMs: maximum + 1 }, {}).timeoutMs, 10_000)
+  assert.equal(parseConfig({ refreshIntervalMinutes: maximum / 60_000 }, {}).refreshIntervalMinutes, maximum / 60_000)
+  assert.equal(parseConfig({ refreshIntervalMinutes: (maximum + 1) / 60_000 }, {}).refreshIntervalMinutes, 10)
+  assert.equal(parseConfig({ refreshIntervalMinutes: 0.5 / 60_000 }, {}).refreshIntervalMinutes, 10)
+  assert.equal(parseConfig({ refreshIntervalMinutes: 0 }, {}).refreshIntervalMinutes, 0)
+  assert.equal(parseConfig({ baseURL: "HTTP://LOCALHOST:80/v1/" }, {}).baseURL, "http://localhost")
+})

@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
 import { Model, Provider } from "@opencode/schema"
+import { Schema } from "effect"
 import { parseConfig } from "../src/config.js"
 import { fetchCatalog, type CPACatalog } from "../src/cpa-client.js"
 import { buildModels, buildProviderInfo, catalogFingerprint } from "../src/catalog.js"
@@ -11,9 +12,19 @@ const config = parseConfig({ baseURL: "http://localhost:8317/v1/" }, {})
 test("provider 使用 Google 原生格式，認證可省略", () => {
   assert.deepEqual(buildProviderInfo(config), {
     id: "cpa", name: "CLIProxyAPI", activation: "enabled", package: "@opencode/ai/providers/google",
-    settings: { baseURL: "http://localhost:8317/v1beta" },
+    settings: { baseURL: "http://localhost:8317/v1beta", apiKey: "cpa" },
   })
-  assert.equal(buildProviderInfo({ ...config, apiKey: "test-key" }).settings?.apiKey, "test-key")
+  assert.equal(buildProviderInfo({ ...config, apiKey: "test-key" }).settings?.apiKey, "cpa")
+})
+
+test("真實 schema 編碼 provider 與 materialized model 不含認證", () => {
+  const secret = "private-cpa-credential"
+  const provider = buildProviderInfo({ ...config, apiKey: secret })
+  const models = buildModels({ models: [{ id: "a", owned_by: "antigravity" }] }, config)
+    .map((model) => ({ ...model, settings: { ...provider.settings, ...model.settings } }))
+  const encoded = [Schema.encodeSync(Provider.Info)(provider), ...models.map((model) => Schema.encodeSync(Model.Info)(model))]
+  assert.doesNotMatch(JSON.stringify(encoded), new RegExp(secret))
+  assert.equal(models[0].settings?.apiKey, "cpa")
 })
 
 test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使用 schema 預設值", async () => {

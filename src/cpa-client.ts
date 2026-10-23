@@ -50,8 +50,15 @@ export function isCatalog(value: unknown): value is CPACatalog {
   })
 }
 
-export async function fetchCatalog(config: Config, dependencies: { fetch?: typeof fetch } = {}): Promise<CPACatalog> {
+export async function fetchCatalog(config: Config, dependencies: {
+  fetch?: typeof fetch
+  signal?: AbortSignal
+  previous?: CPACatalog | null
+  onPrimary?: (catalog: CPACatalog) => void
+} = {}): Promise<CPACatalog> {
   const request = dependencies.fetch ?? globalThis.fetch
+  const controller = new AbortController()
+  const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(config.timeoutMs), ...(dependencies.signal ? [dependencies.signal] : [])])
   async function get(path: string, anthropic = false): Promise<unknown> {
     const headers: Record<string, string> = { Accept: "application/json" }
     if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`
@@ -59,7 +66,7 @@ export async function fetchCatalog(config: Config, dependencies: { fetch?: typeo
     try {
       const response = await request(`${config.baseURL}${path}`, {
         headers,
-        signal: AbortSignal.timeout(config.timeoutMs),
+        signal,
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return await response.json()
@@ -74,14 +81,25 @@ export async function fetchCatalog(config: Config, dependencies: { fetch?: typeo
     }
   }
 
+  const previous = new Map(dependencies.previous?.models.map((model) => [model.id, model]))
   const primary = get("/v1/models").then((value) => {
     if (!record(value) || !Array.isArray(value.data)) throw new Error("CPA /v1/models：缺少 data 模型列表")
-    return value.data.map((item: unknown) => record(item) ? normalizeModel({ id: item.id, owned_by: item.owned_by }) : undefined)
+    const models = value.data.map((item: unknown) => record(item) ? normalizeModel({ id: item.id, owned_by: item.owned_by }) : undefined)
       .filter((model): model is CPAModel => model !== undefined)
+      .map((model) => ({ ...previous.get(model.id), ...model, owned_by: model.owned_by }))
+    dependencies.onPrimary?.({ models })
+    return models
+  }).catch((error: unknown) => {
+    controller.abort()
+    throw error
   })
   const metadata = get("/v1/models", true).catch(() => undefined)
   const secondary = get("/v1beta/models").catch(() => undefined)
-  const [models, anthropic, google] = await Promise.all([primary, metadata, secondary])
+  const [main, meta, extra] = await Promise.allSettled([primary, metadata, secondary])
+  if (main.status === "rejected") throw main.reason
+  const models = main.value
+  const anthropic = meta.status === "fulfilled" ? meta.value : undefined
+  const google = extra.status === "fulfilled" ? extra.value : undefined
   const details = new Map<string, CPAModel>()
   if (record(anthropic) && Array.isArray(anthropic.data)) {
     for (const item of anthropic.data) {

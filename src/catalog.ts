@@ -17,7 +17,8 @@ export function buildProviderInfo(config: Config): Provider.Info {
     package: channels.antigravity.package,
     settings: {
       baseURL: `${config.baseURL}${channels.antigravity.path}`,
-      ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      // 防止 Google provider 讀取 GOOGLE_GENERATIVE_AI_API_KEY；真正認證只在 HTTP hook 注入。
+      apiKey: "cpa",
     },
   }
 }
