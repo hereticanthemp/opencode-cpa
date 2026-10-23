@@ -9,6 +9,7 @@
 - 使用 Google Gemini 原生格式（`/v1beta/models/{id}:streamGenerateContent`），不用 OpenAI compatible。
 - 模型選單提供思考等級 variants，預設要求顯示思考內容。
 - CPA 離線時使用上次的 cache。
+- 圖片模型透過 `cpa_generate_image` tool 產生或編輯圖片，不放進聊天模型清單。
 
 ## 需求
 
@@ -51,7 +52,8 @@
 | --- | --- | --- | --- |
 | `baseURL` | `CPA_BASE_URL` | `http://127.0.0.1:8317` | CPA 伺服器網址。 |
 | `refreshIntervalMinutes` | `CPA_REFRESH_INTERVAL_MINUTES` | `10` | 模型列表更新間隔（分鐘）。`0` 停用。 |
-| `timeoutMs` | （無） | `10000` | 網路請求逾時時間（毫秒）。 |
+| `timeoutMs` | （無） | `10000` | 模型列表請求逾時時間（毫秒）。 |
+| `imageModel` | `CPA_IMAGE_MODEL` | 圖片模型 id 排序後的第一個 | 圖片生成模型。必須存在於目前 CPA 圖片模型清單。 |
 
 優先順序與正規化規則：
 
@@ -71,6 +73,7 @@ CPA URL 依下表選擇。credential 未提供網址時，才使用靜態設定�
 - `baseURL` 正規化：只接受 HTTP 或 HTTPS 網址。不接受內嵌認證、query 或 hash。程式會自動移除結尾斜線，並移除結尾的 `/v1` 或 `/v1beta`。
 - `refreshIntervalMinutes`：環境變數支援字串轉數字。換算後必須介於 1 到 2,147,483,647 毫秒。超出範圍時退回預設值 10 分鐘。設為 0 表示停用定時更新。
 - `timeoutMs`：無環境變數，只從 options 讀取。只接受 1 到 2,147,483,647 的安全正整數。超出範圍或型別無效時退回預設值 10000。
+- `imageModel`：options 優先於 `CPA_IMAGE_MODEL`。只接受非空字串，並移除前後空白。填 CPA 原始模型 id，不加 `cpa/`。
 - 修改已儲存的 CPA URL 時，請重新新增 credential，填入 key 與新網址。OpenChamber 目前只支援修改 credential 標籤，不支援修改其網址。
 
 ## 使用
@@ -98,7 +101,6 @@ opencode run --thinking -m cpa/gemini-3-flash#low "..."
 | --- | --- |
 | Gemini 3 Flash、3.1／3.5 Flash Lite | minimal、low、medium、high |
 | Gemini 3.8 Flash High、4 Argon High | low、medium、high |
-| Gemini 3.1 Flash Image | minimal、high |
 | Claude Opus／Sonnet 5.5 High | low、medium、high（由 CPA 轉成 budget） |
 | GPT-OSS 120B Medium | 不提供 variants |
 
@@ -107,6 +109,28 @@ Claude 的 Codex 等級清單明確為空。plugin 不硬編 Claude 前綴或 bu
 Claude 使用自適應思考。簡單問題可能沒有思考內容；`includeThoughts` 不是強制產生思考的指令。Gemini default 也可能不顯示思考。CLI 需加 `--thinking` 才顯示回傳的思考內容。
 
 GPT-OSS 的 registry 沒有 thinking 區段，CPA 會移除送給它的 thinkingConfig。Codex 顯示的等級來自預設模板，不代表可控制思考。Codex 沒有直接標示等級來源，因此 plugin 採保守判斷：只接受 minimal／low／medium／high（排除 none），且包含 medium 時預設等級必須為 medium。含 xhigh 等其他等級或預設值不符合此規則時，不提供 variants。沒有 metadata 時也不猜測能力。
+
+### 圖片生成與編輯
+
+請要求聊天模型呼叫 `cpa_generate_image`，產生或編輯圖片。CPA 清單有 antigravity 圖片模型時，才提供此 tool。
+
+opencode 2.1.3 Core 不保存模型直接輸出的圖片。因此，圖片模型不出現在聊天模型清單。tool 直接呼叫 CPA，再以 `data:` URI 回傳圖片，讓聊天模型看得到結果。
+
+| 輸入 | 說明 |
+| --- | --- |
+| `prompt` | 必填，非空的圖片生成或編輯指令。 |
+| `images` | 選填，最多 8 個工作目錄內的圖片相對路徑，作為編輯來源或參考。接受 PNG、JPEG、WebP，總大小上限 20 MB。 |
+| `aspectRatio` | 選填，`1:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`。 |
+| `imageSize` | 選填，`1K`、`2K`、`4K`。 |
+| `path` | 選填，工作目錄內的輸出相對路徑。副檔名依回傳格式調整，不覆寫既有檔案。 |
+
+- 預設存到 `.opencode/cpa-images/<YYYYMMDD-HHmmss>-<隨機 hex>.<ext>`。檔名時間使用 UTC。
+- 使用預設目錄時，tool 會建立內容為 `*` 的 `.gitignore`。既有 `.gitignore` 不會覆寫。
+- 要保留的圖片，請要求聊天模型移到專案的正式位置，再納入版本控制。
+- 自訂 `path` 不建立 `.gitignore`。輸入與輸出都不得逃出工作目錄，也不得經過 `.git`。
+- tool 預設使用圖片模型 id 排序後的第一個。可用 `imageModel` 或 `CPA_IMAGE_MODEL` 指定模型。
+- 每次執行都重新讀取 active connection 的 key 與有效 CPA URL。圖片請求逾時時間為 120 秒，不使用 catalog 的 `timeoutMs`。
+- 圖片 base64 會存進 session 資料庫。刪除工作目錄的圖片檔案，不會移除 session 內的圖片資料。
 
 ## 運作方式
 
