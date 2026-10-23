@@ -2,7 +2,7 @@ import type { Plugin } from "@opencode/plugin"
 import { setTimeout as delay } from "node:timers/promises"
 import { cachePath, readCache, writeCache } from "./cache.js"
 import { buildModels, buildProviderInfo, catalogFingerprint } from "./catalog.js"
-import { parseConfig, type Config } from "./config.js"
+import { parseConfig, resolveConfig, type Config } from "./config.js"
 import { fetchCatalog, type CPACatalog } from "./cpa-client.js"
 
 type Context = Pick<Plugin.Context, "options" | "provider" | "integration" | "event">
@@ -22,18 +22,22 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   // 只記錄固定訊息，不轉印設定值、遠端回應或例外內容。
   const log = dependencies.log ?? ((message: string) => console.error(`[opencode-cpa] ${message}`))
   const env = dependencies.env ?? process.env
-  let config: Config
+  let staticConfig: Config
   try {
-    config = parseConfig(ctx.options, env)
+    staticConfig = parseConfig(ctx.options, env)
   } catch {
     log("設定讀取失敗；不註冊 provider。")
     return
   }
 
-  const path = dependencies.cachePath ?? cachePath(env, undefined, config.baseURL)
-  let catalog: CPACatalog | null = await readCache(path)
-  let fingerprint = catalogFingerprint(catalog ? buildModels(catalog, config) : [])
-  let writtenFingerprint = catalog ? fingerprint : undefined
+  let config = staticConfig
+  let path: string | undefined
+  let catalog: CPACatalog | null = null
+  let fingerprint = catalogFingerprint([])
+  let writtenFingerprint: string | undefined
+  let generation = 0
+  let cachedReady!: () => void
+  const cachedStartup = new Promise<void>((resolve) => { cachedReady = resolve })
   let disposed = false
   let fetching = false
   let registered = false
@@ -43,15 +47,35 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   let writing: Promise<boolean> | undefined
   const integration = await ctx.integration.transform((editor) => {
     editor.update("cpa", (value) => { value.name = "CLIProxyAPI" })
-    editor.method.update({ integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key" } })
+    editor.method.update({ integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key", form: [{
+      key: "cpaBaseURL", type: "string", title: "CPA URL",
+      description: "例如 http://127.0.0.1:8317 或 https://cpa.example.com",
+      format: "uri", placeholder: "http://127.0.0.1:8317", required: false,
+    }] } })
     editor.method.update({ integrationID: "cpa", method: { type: "env", names: ["CPA_API_KEY"] } })
   })
 
-  async function apiKey(): Promise<string | undefined> {
+  type ConnectionSettings = { type: "credential" | "none"; apiKey?: string; config: Config } | { type: "error" }
+  async function connectionSettings(): Promise<ConnectionSettings> {
     try {
       const connection = await ctx.integration.connection.active("cpa")
-      const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
-      if (disposed || !connection || credential?.type !== "key") return undefined
+      if (disposed) return { type: "error" }
+      if (!connection) return { type: "none", config: staticConfig }
+      const credential = await ctx.integration.connection.resolve(connection)
+      if (disposed) return { type: "error" }
+      if (!credential) throw new Error("Credential unavailable")
+      let effective: Config
+      try {
+        effective = resolveConfig(staticConfig, connection.type === "credential" ? credential.metadata?.cpaBaseURL : undefined)
+      } catch {
+        log("credential 的 CPA URL 無效；保留目前來源，本次不抓取模型。")
+        try {
+          await ctx.integration.connection.status({ integrationID: "cpa", connection,
+            status: { status: "needs_auth", message: "CLIProxyAPI CPA URL is invalid. Enter a valid URL." } })
+        } catch {}
+        return { type: "error" }
+      }
+      if (credential.type !== "key") return { type: "credential", config: effective }
       const empty = credential.key.trim() === ""
       if (empty) log("CLIProxyAPI API key 為空；請重新輸入有效的 key。模型列表請求不帶認證。")
       try {
@@ -62,9 +86,10 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       } catch {
         // UI 狀態回報失敗不改變模型列表請求的認證判斷。
       }
-      return empty ? undefined : credential.key
+      return { type: "credential", config: effective, ...(empty ? {} : { apiKey: credential.key }) }
     } catch {
-      return undefined
+      if (!disposed) log("credential 讀取失敗；保留目前來源，本次不抓取模型。")
+      return { type: "error" }
     }
   }
 
@@ -73,37 +98,57 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     fetching = true
     controller = new AbortController()
     const signal = controller.signal
+    const revision = generation
+    const current = () => !disposed && revision === generation && !signal.aborted
     primary = undefined
     try {
       // connection 讀取也受冷啟動與 cleanup 的 signal 限制；晚到的 key 不啟動請求。
-      const key = await new Promise<string | undefined>((resolve, reject) => {
+      const settings = await new Promise<Awaited<ReturnType<typeof connectionSettings>>>((resolve, reject) => {
         const abort = () => reject(signal.reason)
         signal.addEventListener("abort", abort, { once: true })
-        void apiKey().then(resolve).finally(() => signal.removeEventListener("abort", abort))
+        void connectionSettings().then(resolve).finally(() => signal.removeEventListener("abort", abort))
       })
       signal.throwIfAborted()
-      const next = await fetchCatalog(config, {
-        apiKey: key, fetch: dependencies.fetch, signal, previous: catalog,
-        onPrimary: (value) => { primary = value },
+      if (!current() || settings.type === "error") return
+      const changedSource = path !== undefined && settings.config.baseURL !== config.baseURL
+      if (path === undefined || changedSource) {
+        const nextPath = dependencies.cachePath ?? cachePath(env, undefined, settings.config.baseURL)
+        const cached = await readCache(nextPath)
+        if (!current()) return
+        config = settings.config
+        path = nextPath
+        catalog = cached
+        fingerprint = catalogFingerprint(cached ? buildModels(cached, config) : [])
+        writtenFingerprint = cached ? fingerprint : undefined
+        if (cached) cachedReady()
+        // 切換來源後只發布新網址的快取；沒有快取時移除舊 provider。
+        if (registered) await ctx.provider.reload()
+      }
+      if (!current()) return
+      const requestConfig = config
+      const requestPath = path!
+      const next = await fetchCatalog(requestConfig, {
+        apiKey: settings.apiKey, fetch: dependencies.fetch, signal, previous: catalog,
+        onPrimary: (value) => { if (current()) primary = value },
       })
-      if (disposed) return
-      const nextFingerprint = catalogFingerprint(buildModels(next, config))
+      if (!current()) return
+      const nextFingerprint = catalogFingerprint(buildModels(next, requestConfig))
       const changed = nextFingerprint !== fingerprint
       catalog = next
       fingerprint = nextFingerprint
       if (disposed) return
       if (writtenFingerprint !== nextFingerprint) {
-        const task = writing = (dependencies.writeCache ?? writeCache)(next, path)
+        const task = writing = (dependencies.writeCache ?? writeCache)(next, requestPath)
         try {
-          if (await task) writtenFingerprint = nextFingerprint
+          if (await task) { if (current()) writtenFingerprint = nextFingerprint }
           else if (!disposed) log("模型快取寫入失敗。")
         } finally {
           if (writing === task) writing = undefined
         }
       }
-      if (!disposed && (reload || registered) && changed) await ctx.provider.reload()
+      if (current() && (reload || registered) && changed) await ctx.provider.reload()
     } catch {
-      if (!disposed) log("模型更新失敗；保留目前的模型目錄。")
+      if (!disposed && revision === generation) log("模型更新失敗；保留目前來源的模型快取，沒有快取時不註冊 provider。")
     } finally {
       fetching = false
       if (pendingRefresh && !disposed) {
@@ -113,8 +158,13 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     }
   }
 
-  function requestRefresh(): void {
+  function requestRefresh(invalidate = false): void {
     if (disposed) return
+    if (invalidate) {
+      generation++
+      primary = undefined
+      controller?.abort()
+    }
     if (fetching) pendingRefresh = true
     else void refresh(true)
   }
@@ -132,12 +182,12 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
         try {
           let next = iterator.next()
           // 斷線期間可能遺失 credential 事件；重新訂閱後補讀一次。
-          if (retrying) requestRefresh()
+          if (retrying) requestRefresh(true)
           while (!disposed) {
             const result = await next
             if (result.done) return
             const event = result.value
-            if (event.type === "credential.switched" && event.data.integrationID === "cpa") requestRefresh()
+            if (event.type === "credential.switched" && event.data.integrationID === "cpa") requestRefresh(true)
             next = iterator.next()
           }
         } finally {
@@ -153,11 +203,11 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     }
   })()
 
-  const cached = catalog !== null
-  if (!cached) {
+  {
     let timer: ReturnType<typeof setTimeout> | undefined
     await Promise.race([
       refresh(false),
+      cachedStartup,
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           if (primary && catalog === null) {
@@ -176,7 +226,6 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     if (models.length) editor.add({ info: buildProviderInfo(config), models })
   })
   registered = true
-  if (cached) void refresh(true)
   const schedule = dependencies.setInterval ?? setInterval
   const cancel = dependencies.clearInterval ?? clearInterval
   const timer = config.refreshIntervalMinutes > 0

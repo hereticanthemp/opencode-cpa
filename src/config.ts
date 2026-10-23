@@ -8,7 +8,7 @@ function nonempty(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined
 }
 
-function baseURL(value: unknown): string | undefined {
+export function normalizeBaseURL(value: unknown): string | undefined {
   const text = nonempty(value)
   if (!text) return
   try {
@@ -18,6 +18,14 @@ function baseURL(value: unknown): string | undefined {
   } catch {
     return
   }
+}
+
+/** 靜態設定不含 credential；每次 refresh 另外套用 active credential 的網址。 */
+export function resolveConfig(config: Config, metadataURL: unknown): Config {
+  if (metadataURL === undefined) return config
+  const resolved = normalizeBaseURL(metadataURL)
+  if (!resolved) throw new Error("CLIProxyAPI CPA URL is invalid.")
+  return { ...config, baseURL: resolved }
 }
 
 function number(value: unknown, allowString = false): number | undefined {
@@ -33,7 +41,7 @@ export function parseConfig(
   const refresh = number(options.refreshIntervalMinutes) ?? number(env.CPA_REFRESH_INTERVAL_MINUTES, true) ?? 10
   const timeout = number(options.timeoutMs) ?? 10_000
   return {
-    baseURL: baseURL(options.baseURL) ?? baseURL(env.CPA_BASE_URL) ?? "http://127.0.0.1:8317",
+    baseURL: normalizeBaseURL(options.baseURL) ?? normalizeBaseURL(env.CPA_BASE_URL) ?? "http://127.0.0.1:8317",
     refreshIntervalMinutes: refresh === 0 || (refresh >= 1 / 60_000 && refresh <= 2_147_483_647 / 60_000) ? refresh : 10,
     timeoutMs: Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 2_147_483_647 ? timeout : 10_000,
   }

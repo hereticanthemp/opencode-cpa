@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { parseConfig } from "../src/config.js"
+import { parseConfig, resolveConfig } from "../src/config.js"
 
 test("config 使用預設值，且 API key 可省略", () => {
   assert.deepEqual(parseConfig({}, {}), {
@@ -56,4 +56,23 @@ test("timer 毫秒值限制在 1 到 signed 32-bit 最大值，0 只停用 inter
   assert.equal(parseConfig({ refreshIntervalMinutes: 0.5 / 60_000 }, {}).refreshIntervalMinutes, 10)
   assert.equal(parseConfig({ refreshIntervalMinutes: 0 }, {}).refreshIntervalMinutes, 0)
   assert.equal(parseConfig({ baseURL: "HTTP://LOCALHOST:80/v1/" }, {}).baseURL, "http://localhost")
+})
+
+test("CPA URL 優先使用 credential metadata，再使用 options、環境變數與預設值", () => {
+  const env = { CPA_BASE_URL: "https://env.example/v1" }
+  const options = { baseURL: "https://option.example/v1beta" }
+  const config = parseConfig(options, env)
+  assert.equal(resolveConfig(config, " https://credential.example/v1beta/// ").baseURL, "https://credential.example")
+  assert.equal(resolveConfig(config, undefined).baseURL, "https://option.example")
+  assert.equal(resolveConfig(parseConfig({}, env), undefined).baseURL, "https://env.example")
+  assert.equal(resolveConfig(parseConfig({}, {}), undefined).baseURL, "http://127.0.0.1:8317")
+  assert.equal(config.baseURL, "https://option.example", "不得修改靜態設定")
+})
+
+test("metadata 未提供時沿用靜態設定，存在但無效時丟錯且不轉印設定值", () => {
+  const config = parseConfig({ baseURL: "https://option.example" }, {})
+  assert.equal(resolveConfig(config, undefined), config)
+  for (const value of ["", " \t ", null, 42, [], "bad", "file:///test", "http://user:password@host", "http://host/?key=secret", "http://host/#secret"]) {
+    assert.throws(() => resolveConfig(config, value), { message: "CLIProxyAPI CPA URL is invalid." })
+  }
 })

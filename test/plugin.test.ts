@@ -4,8 +4,8 @@ import { join } from "node:path"
 import test, { type TestContext } from "node:test"
 import { setTimeout as delay } from "node:timers/promises"
 import type { Plugin } from "@opencode/plugin"
-import { Credential } from "@opencode/schema"
-import { Context, Effect, PubSub, Stream } from "effect"
+import { Credential, Model, Provider } from "@opencode/schema"
+import { Context, Effect, PubSub, Schema, Stream } from "effect"
 import { cachePath, readCache, writeCache } from "../src/cache.js"
 import { buildModels, buildProviderInfo } from "../src/catalog.js"
 import { parseConfig } from "../src/config.js"
@@ -44,9 +44,19 @@ async function fixture(t: TestContext, cached?: string) {
   let cleanup: Plugin.Cleanup | void
   const logs: string[] = []
   const options = { baseURL: "http://localhost:8317/v1", refreshIntervalMinutes: 1 }
+  let added: Parameters<Editor["add"]>[0][] = []
+  function replay() {
+    added = []
+    const result = callback?.({ add(input) { added.push(input) } } as Parameters<NonNullable<typeof callback>>[0])
+    assert.equal(result, undefined, "transform 必須同步")
+  }
   const provider = {
-    async transform(cb: typeof callback) { callback = cb; return { async dispose() { disposals++ } } },
-    async reload() { reloads++ },
+    async transform(cb: typeof callback) {
+      callback = cb
+      replay()
+      return { async dispose() { disposals++; callback = undefined; added = [] } }
+    },
+    async reload() { reloads++; replay() },
   } as Plugin.Context["provider"]
   let integrationRegistered = false
   let key: string | undefined = "test-only-key"
@@ -69,7 +79,11 @@ async function fixture(t: TestContext, cached?: string) {
         method: { update(input) { methods.push(input) } },
       } as Parameters<typeof cb>[0])
       assert.deepEqual(methods, [
-        { integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key" } },
+        { integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key", form: [{
+          key: "cpaBaseURL", type: "string", title: "CPA URL",
+          description: "例如 http://127.0.0.1:8317 或 https://cpa.example.com",
+          format: "uri", placeholder: "http://127.0.0.1:8317", required: false,
+        }] } },
         { integrationID: "cpa", method: { type: "env", names: ["CPA_API_KEY"] } },
       ])
       integrationRegistered = true
@@ -139,12 +153,7 @@ async function fixture(t: TestContext, cached?: string) {
     tick() { tick?.() },
     async start() { cleanup = await setup({ options, provider, integration, event }, dependencies) },
     async stop() { const stop = cleanup; cleanup = undefined; await stop?.() },
-    added() {
-      const added: Parameters<Editor["add"]>[0][] = []
-      const result = callback?.({ add(input) { added.push(input) } } as Parameters<NonNullable<typeof callback>>[0])
-      assert.equal(result, undefined, "transform 必須同步")
-      return added
-    },
+    added() { return added },
   }
 }
 
@@ -356,7 +365,7 @@ test("定期更新 metadata 失敗時沿用上次資料，不降級圖片能力"
   assert.deepEqual(f.added()[0].models[0].capabilities.input, ["image", "text"])
 })
 
-test("每次更新重新讀 connection；沒有 connection 或讀取失敗時不帶認證", async (t) => {
+test("每次更新重新讀 connection；沒有 connection 時不帶認證，讀取失敗時不抓取", async (t) => {
   const f = await fixture(t)
   f.key = undefined
   await f.start()
@@ -367,12 +376,13 @@ test("每次更新重新讀 connection；沒有 connection 或讀取失敗時不
   await delay(20)
   f.connectionFails = true
   f.tick()
-  await until(() => f.requests === 9)
+  await until(() => f.logs.length === 1)
   await delay(20)
-  assert.deepEqual(f.logs, [])
+  assert.equal(f.requests, 6)
+  assert.deepEqual(f.logs, ["credential 讀取失敗；保留目前來源，本次不抓取模型。"])
 })
 
-test("resolve 失敗不丟錯，也不帶認證", async (t) => {
+test("resolve 失敗不丟錯，也不抓取模型", async (t) => {
   const f = await fixture(t)
   f.integration.connection.resolve = async () => { throw new Error("secret") }
   f.dependencies.fetch = async (_url, init) => {
@@ -380,8 +390,9 @@ test("resolve 失敗不丟錯，也不帶認證", async (t) => {
     return Response.json({ data: [{ id: "a", owned_by: "antigravity" }] })
   }
   await f.start()
-  assert.equal(f.added()[0].models[0].id, "a")
-  assert.deepEqual(f.logs, [])
+  assert.deepEqual(f.added(), [])
+  assert.equal(f.requests, 0)
+  assert.deepEqual(f.logs, ["credential 讀取失敗；保留目前來源，本次不抓取模型。"])
 })
 
 test("非 key credential 不帶認證", async (t) => {
@@ -608,4 +619,192 @@ test("2.1.3 adapter 使用的 Effect iterator.next 同步建立 PubSub 訂閱", 
   } finally {
     await iterator.return?.()
   }
+})
+
+function credentialURL(f: Awaited<ReturnType<typeof fixture>>, url: () => string | undefined) {
+  f.integration.connection.active = async () => ({
+    type: "credential", id: Credential.ID.make("cred_url"), label: "CLIProxyAPI", method: "key",
+  })
+  f.integration.connection.resolve = async () => {
+    const value = url()
+    return { type: "key", key: "test-only-key", ...(value === undefined ? {} : { metadata: { cpaBaseURL: value } }) }
+  }
+}
+
+test("冷啟動先以 credential 網址找快取，不讀 options 網址的快取", async (t) => {
+  const f = await fixture(t, "wrong-source")
+  const root = "http://credential.example:8317"
+  const path = cachePath(f.dependencies.env, undefined, root)
+  await writeCache({ models: [{ id: "right-source", owned_by: "antigravity" }] }, path)
+  credentialURL(f, () => `${root}/v1beta/`)
+  const gate = deferred()
+  f.gate = gate.promise
+  await f.start()
+  assert.equal(f.added()[0].models[0].id, "right-source")
+  assert.equal(f.added()[0].info.settings?.baseURL, `${root}/v1beta`)
+  gate.resolve()
+  await until(() => f.reloads === 1)
+  assert.equal((await readCache(f.path))?.models[0].id, "wrong-source")
+  assert.equal((await readCache(path))?.models[0].id, "new-model")
+})
+
+test("metadata 空白或無效網址回報 needs_auth 並停止抓取，env connection 不採用 metadata", async (t) => {
+  for (const url of ["", " \t ", "http://user:sensitive-password@invalid.example"]) {
+    const f = await fixture(t)
+    credentialURL(f, () => url)
+    await f.start()
+    assert.deepEqual(f.added(), [])
+    assert.equal(f.requests, 0)
+    assert.equal(f.logs.length, 1)
+    assert.equal(f.statuses.at(-1)?.status?.status, "needs_auth")
+    assert.doesNotMatch(f.logs.join(""), /sensitive-password|test-only-key/)
+  }
+  const f = await fixture(t)
+  f.integration.connection.resolve = async () => ({ type: "key", key: "test-only-key", metadata: { cpaBaseURL: "https://ignored.example" } })
+  await f.start()
+  assert.equal(f.added()[0].info.settings?.baseURL, "http://localhost:8317/v1beta")
+})
+
+test("credential 切換網址時換快取並 reload，相同模型也產出新網址，移除後退回 options", async (t) => {
+  const f = await fixture(t)
+  let url: string | undefined
+  credentialURL(f, () => url)
+  await f.start()
+  const root = "https://new.example/proxy"
+  url = `${root}/v1/`
+  f.emit("cpa")
+  const path = cachePath(f.dependencies.env, undefined, root)
+  await until(async () => (await readCache(path)) !== null)
+  assert.equal(f.added()[0].info.settings?.baseURL, `${root}/v1beta`)
+  assert.equal(f.added()[0].models[0].settings?.baseURL, `${root}/v1beta`)
+  assert.ok(f.reloads >= 1)
+  assert.equal((await readCache(f.path))?.models[0].id, "new-model")
+  assert.notEqual(f.path, path)
+  const { info, models } = f.added()[0]
+  const encoded = [Schema.encodeSync(Provider.Info)(info), ...models.map((model) => Schema.encodeSync(Model.Info)(model))]
+  assert.doesNotMatch(JSON.stringify(encoded), /test-only-key|apiKey|cpaBaseURL/)
+  await delay(10)
+  const reloads = f.reloads
+  f.key = undefined
+  f.integration.connection.active = async () => undefined
+  f.emit("cpa")
+  await until(() => f.reloads > reloads)
+  assert.equal(f.added()[0].info.settings?.baseURL, "http://localhost:8317/v1beta")
+})
+
+test("新網址失敗時只沿用新來源快取，沒有新快取時移除舊 provider", async (t) => {
+  for (const cached of [false, true]) {
+    const f = await fixture(t)
+    await f.start()
+    const root = "https://offline.example"
+    const path = cachePath(f.dependencies.env, undefined, root)
+    if (cached) await writeCache({ models: [{ id: "new-source-cache", owned_by: "antigravity" }] }, path)
+    credentialURL(f, () => root)
+    f.fails = true
+    f.emit("cpa")
+    await until(() => f.logs.length === 1)
+    assert.ok(f.reloads >= 1)
+    if (cached) {
+      assert.equal(f.added()[0].models[0].id, "new-source-cache")
+      assert.equal(f.added()[0].info.settings?.baseURL, `${root}/v1beta`)
+    } else assert.deepEqual(f.added(), [])
+    assert.equal((await readCache(f.path))?.models[0].id, "new-model")
+  }
+})
+
+test("切換網址後丟棄舊請求晚到結果，不覆寫舊快取或發布舊模型", async (t) => {
+  const f = await fixture(t, "old-cache")
+  const gate = deferred()
+  let oldStarted = false
+  let oldSignal: AbortSignal | null | undefined
+  f.dependencies.fetch = async (url, init) => {
+    if (String(url).startsWith("http://localhost:8317")) {
+      oldStarted = true
+      oldSignal = init?.signal
+      await gate.promise // 模擬忽略 abort 的遠端請求。
+      return Response.json({ data: [{ id: "must-discard", owned_by: "antigravity" }] })
+    }
+    return Response.json({ data: [{ id: "new-source", owned_by: "antigravity" }] })
+  }
+  await f.start()
+  await until(() => oldStarted)
+  credentialURL(f, () => "https://new.example")
+  f.emit("cpa")
+  await until(() => oldSignal?.aborted === true)
+  gate.resolve()
+  await until(() => f.added()[0]?.models[0]?.id === "new-source")
+  assert.equal(f.added()[0].info.settings?.baseURL, "https://new.example/v1beta")
+  assert.equal((await readCache(f.path))?.models[0].id, "old-cache")
+  assert.doesNotMatch(await readFile(f.path, "utf8"), /must-discard/)
+})
+
+test("來源 B credential 讀取失敗時保留 B 與 catalog，恢復後正常更新", async (t) => {
+  const f = await fixture(t)
+  credentialURL(f, () => "https://source-b.example")
+  await f.start()
+  const active = f.integration.connection.active
+  const published = f.added()
+  const requests = f.requests
+  f.integration.connection.active = async () => { throw new Error("sensitive-read-error") }
+  f.tick()
+  await until(() => f.logs.length === 1)
+  assert.equal(f.requests, requests)
+  assert.equal(f.added(), published)
+  assert.equal(f.added()[0].info.settings?.baseURL, "https://source-b.example/v1beta")
+  f.integration.connection.active = active
+  f.id = "recovered"
+  f.tick()
+  await until(() => f.added()[0]?.models[0]?.id === "recovered")
+  assert.equal(f.added()[0].info.settings?.baseURL, "https://source-b.example/v1beta")
+  assert.doesNotMatch(f.logs.join(""), /sensitive-read-error/)
+})
+
+test("metadata 無效時保留來源 B，不退回靜態網址，修正後恢復", async (t) => {
+  const f = await fixture(t)
+  let url = "https://source-b.example"
+  credentialURL(f, () => url)
+  await f.start()
+  const published = f.added()
+  const requests = f.requests
+  url = "http://user:secret@invalid.example"
+  f.emit("cpa")
+  await until(() => f.logs.length === 1)
+  assert.equal(f.requests, requests)
+  assert.equal(f.added(), published)
+  assert.equal(f.statuses.at(-1)?.status?.status, "needs_auth")
+  url = "https://source-b.example"
+  f.id = "valid-again"
+  f.emit("cpa")
+  await until(() => f.added()[0]?.models[0]?.id === "valid-again")
+  assert.equal(f.statuses.at(-1)?.status, undefined)
+})
+
+test("冷啟動取消後空 transform 已註冊，晚到的新來源快取必須 reload 才發布", async (t) => {
+  const f = await fixture(t)
+  f.options.refreshIntervalMinutes = 0
+  const root = "https://late-source.example"
+  await writeCache({ models: [{ id: "late-cache", owned_by: "antigravity" }] }, cachePath(f.dependencies.env, undefined, root))
+  credentialURL(f, () => root)
+  const active = f.integration.connection.active
+  const old = deferred()
+  const next = deferred()
+  let calls = 0
+  f.integration.connection.active = async (id) => {
+    const call = ++calls
+    await (call === 1 ? old.promise : next.promise)
+    return active(id)
+  }
+  f.fails = true
+  const starting = f.start()
+  await until(() => calls === 1)
+  f.emit("cpa")
+  await starting
+  assert.deepEqual(f.added(), [])
+  assert.equal(f.reloads, 0)
+  next.resolve()
+  await until(() => f.logs.length === 1)
+  assert.equal(f.reloads, 1)
+  assert.equal(f.added()[0].models[0].id, "late-cache")
+  assert.equal(f.added()[0].info.settings?.baseURL, `${root}/v1beta`)
+  old.resolve()
 })

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 import { Model, Provider } from "@opencode/schema"
 import { Schema } from "effect"
-import { parseConfig } from "../src/config.js"
+import { parseConfig, resolveConfig } from "../src/config.js"
 import { fetchCatalog, type CPACatalog } from "../src/cpa-client.js"
 import { buildModels, buildProviderInfo, catalogFingerprint } from "../src/catalog.js"
 
@@ -28,6 +28,17 @@ test("真實 schema 編碼 provider 與 materialized model 不含認證", () => 
   assert.equal(models[0].settings?.apiKey, undefined)
 })
 
+test("provider 與模型使用有效 credential 網址、Core Google package，settings 不含認證", () => {
+  const effective = resolveConfig(config, "https://credential.example/proxy/v1/")
+  const provider = buildProviderInfo(effective)
+  const models = buildModels({ models: [{ id: "a", owned_by: "antigravity" }] }, effective)
+  for (const info of [provider, ...models]) {
+    assert.equal(info.package, "@opencode/ai/providers/google")
+    assert.deepEqual(info.settings, { baseURL: "https://credential.example/proxy/v1beta" })
+    assert.equal(info.settings?.apiKey, undefined)
+  }
+})
+
 test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使用 schema 預設值", async () => {
   const mixed = JSON.parse(await readFile(new URL("./fixtures/mixed-models.json", import.meta.url), "utf8"))
   const raw = await fetchCatalog(config, { fetch: async (url) => Response.json(String(url).includes("v1beta") ? {} : mixed) })
@@ -37,6 +48,7 @@ test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使
     assert.equal(model.modelID, model.id)
     assert.equal(model.providerID, "cpa")
     assert.equal(model.package, "@opencode/ai/providers/google")
+    assert.equal(model.settings?.apiKey, undefined)
     assert.deepEqual(model.settings, { baseURL: "http://localhost:8317/v1beta" })
     assert.deepEqual(model.capabilities, { tools: true, input: ["text"], output: ["text"] })
     assert.deepEqual(model.cost, [])
