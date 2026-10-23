@@ -130,10 +130,10 @@ test("cloaking 開啟與停用的 Anthropic fixture 產生相同真實模型目�
   assert.deepEqual(cloaked.models.map((model) => model.id).sort(), primary.data.map((model: { id: string }) => model.id).sort())
   assert.ok(cloaked.models.every((model) => model.display_name && model.max_input_tokens && model.max_tokens && model.input && model.output))
   const models = buildModels(cloaked, config)
-  assert.equal(models.length, 9)
+  assert.equal(models.length, 8)
   assert.equal(models.find((model) => model.id === "gpt-oss-120b-medium")?.name, "GPT-OSS 120B (Medium)")
-  assert.deepEqual(models.find((model) => model.id === "gemini-3.1-flash-image")?.limit, { context: 200000, output: 64000 })
-  assert.deepEqual(models.find((model) => model.id === "gemini-3.1-flash-image")?.capabilities.output, ["image", "text"])
+  assert.equal(models.some((model) => model.id === "gemini-3.1-flash-image"), false)
+  assert.deepEqual(cloaked.models.find((model) => model.id === "gemini-3.1-flash-image")?.output, ["text", "image"])
 })
 
 test("模型清單與渠道只依主來源，不使用 Anthropic owned_by 或額外模型", async () => {
@@ -176,7 +176,7 @@ test("Anthropic 網路、HTTP、JSON、結構與欄位錯誤使用預設名稱�
       return json(String(url).includes("v1beta") ? google : primary)
     } })
     const models = buildModels(raw, config)
-    assert.equal(models.length, 9)
+    assert.equal(models.length, 8)
     for (const model of models) {
       assert.equal(model.name, model.id)
       assert.deepEqual(model.limit, { context: 200000, output: 32000 })

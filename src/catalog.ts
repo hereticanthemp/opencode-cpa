@@ -42,10 +42,16 @@ function variants(model: CPACatalog["models"][number]): Model.Info["variants"] {
   return selected.map((level) => ({ id: Model.VariantID.make(level), settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: level } } }))
 }
 
+export function imageModels(catalog: CPACatalog): string[] {
+  return [...new Set(catalog.models.filter((model) => model.owned_by && Object.hasOwn(channels, model.owned_by)
+    && model.output?.some((value) => value.toLowerCase() === "image")).map((model) => model.id))].sort(compare)
+}
+
 export function buildModels(catalog: CPACatalog, config: Config): Model.Info[] {
+  const images = new Set(imageModels(catalog))
   return catalog.models.flatMap((model) => {
     const channel = model.owned_by && Object.hasOwn(channels, model.owned_by) ? channels[model.owned_by] : undefined
-    if (!channel) return []
+    if (!channel || images.has(model.id)) return []
     const defaults = Model.Info.default(providerID, Model.ID.make(model.id))
     return [{
       ...defaults,

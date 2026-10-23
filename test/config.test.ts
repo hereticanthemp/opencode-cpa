@@ -2,6 +2,14 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { parseConfig, resolveConfig } from "../src/config.js"
 
+test("imageModel trim 後優先使用 options，無效來源略過", () => {
+  assert.equal(parseConfig({ imageModel: " option " }, { CPA_IMAGE_MODEL: "env" }).imageModel, "option")
+  for (const imageModel of [undefined, null, 42, "", "  "]) {
+    assert.equal(parseConfig({ imageModel }, { CPA_IMAGE_MODEL: " env " }).imageModel, "env")
+    assert.equal(parseConfig({ imageModel }, {}).imageModel, undefined)
+  }
+})
+
 test("config 使用預設值，且 API key 可省略", () => {
   assert.deepEqual(parseConfig({}, {}), {
     baseURL: "http://127.0.0.1:8317", refreshIntervalMinutes: 10, timeoutMs: 10_000,

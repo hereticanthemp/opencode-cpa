@@ -5,7 +5,7 @@ import { Model, Provider } from "@opencode/schema"
 import { Schema } from "effect"
 import { parseConfig, resolveConfig } from "../src/config.js"
 import { fetchCatalog, type CPACatalog } from "../src/cpa-client.js"
-import { buildModels, buildProviderInfo, catalogFingerprint } from "../src/catalog.js"
+import { buildModels, buildProviderInfo, catalogFingerprint, imageModels } from "../src/catalog.js"
 
 const config = parseConfig({ baseURL: "http://localhost:8317/v1/" }, {})
 
@@ -67,12 +67,12 @@ test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使
 
 test("catalog 轉換 modalities、去重與排序，忽略未知詞彙", () => {
   const raw: CPACatalog = { models: [
-    { id: "a", owned_by: "antigravity", input: ["TEXT", "IMAGE", "AUDIO", "VIDEO", "PDF", "image", "unknown"], output: ["IMAGE", "TEXT"] },
+    { id: "a", owned_by: "antigravity", input: ["TEXT", "IMAGE", "AUDIO", "VIDEO", "PDF", "image", "unknown"], output: ["TEXT", "text"] },
     { id: "b", owned_by: "antigravity", input: [], output: ["unknown"] },
   ] }
   const models = buildModels(raw, config)
   assert.deepEqual(models[0].capabilities.input, ["audio", "image", "pdf", "text", "video"])
-  assert.deepEqual(models[0].capabilities.output, ["image", "text"])
+  assert.deepEqual(models[0].capabilities.output, ["text"])
   assert.deepEqual(models[1].capabilities, { tools: true, input: ["text"], output: ["text"] })
 })
 
