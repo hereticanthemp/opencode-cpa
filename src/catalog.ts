@@ -3,7 +3,8 @@ import { Integration, Model, Provider } from "@opencode/schema"
 import type { Config } from "./config.js"
 import type { CPACatalog } from "./cpa-client.js"
 
-// 使用 Core 內建的 Google provider，避免跨套件 instance 影響 AIError 判斷與重試。
+// ProviderEditor.add() 不會把 @ai-sdk/* 改寫成 OpenCode 內建套件，因此直接使用原生 specifier。
+// 不用 plugin 自帶的 provider 模組：跨套件的 AIError 會讓 Core 的 instanceof 判斷失效，串流錯誤無法自動重試。
 export const channels: Readonly<Record<string, { package: string; path: string }>> = {
   antigravity: { package: "@opencode/ai/providers/google", path: "/v1beta" },
 }
