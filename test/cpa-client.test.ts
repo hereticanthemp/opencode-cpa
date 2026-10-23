@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
 import { parseConfig } from "../src/config.js"
-import { fetchCatalog } from "../src/cpa-client.js"
+import { codexModelsPath, fetchCatalog } from "../src/cpa-client.js"
 import { buildModels } from "../src/catalog.js"
 
 const config = parseConfig({}, {})
@@ -10,7 +10,7 @@ const fixture = async (name: string) => JSON.parse(await readFile(new URL(`./fix
 const json = (value: unknown) => Response.json(value)
 const isAnthropic = (init?: RequestInit) => new Headers(init?.headers).has("anthropic-version")
 
-test("fetchCatalog 平行抓取三個來源，正確帶入認證與 timeout", async () => {
+test("fetchCatalog 平行抓取四個來源，正確帶入認證與 timeout", async () => {
   const primary = await fixture("openai")
   const metadata = await fixture("anthropic")
   const google = await fixture("google")
@@ -19,13 +19,14 @@ test("fetchCatalog 平行抓取三個來源，正確帶入認證與 timeout", as
   let release!: () => void
   const barrier = new Promise<void>((resolve) => { release = resolve })
   const request: typeof fetch = async (url, init) => {
-    const path = new URL(String(url)).pathname
+    const parsed = new URL(String(url))
+    const path = parsed.pathname + parsed.search
     const headers = new Headers(init?.headers)
     started.push(`${path}${isAnthropic(init) ? ":anthropic" : ""}`)
     assert.equal(headers.get("authorization"), "Bearer test-key")
     assert.ok(init?.signal instanceof AbortSignal)
     signals.push(init.signal)
-    if (started.length === 3) release()
+    if (started.length === 4) release()
     await barrier
     if (path === "/v1/models") {
       if (isAnthropic(init)) {
@@ -39,7 +40,7 @@ test("fetchCatalog 平行抓取三個來源，正確帶入認證與 timeout", as
     return json(google)
   }
   const catalog = await fetchCatalog(config, { apiKey: "test-key", fetch: request })
-  assert.deepEqual(started, ["/v1/models", "/v1/models:anthropic", "/v1beta/models"])
+  assert.deepEqual(started, ["/v1/models", "/v1/models:anthropic", "/v1beta/models", codexModelsPath])
   assert.equal(new Set(signals).size, 1)
   assert.equal(catalog.models.length, 9)
   assert.deepEqual(catalog.models.find((model) => model.id === "claude-opus-5-5-high")?.input, ["text", "image"])
@@ -200,7 +201,7 @@ test("metadata 暫時失敗保留同 id 的已知欄位，但不保留刪除的�
 test("主來源失敗時中止 metadata，等待所有請求結束後才 reject", async () => {
   let completed = 0
   const request: typeof fetch = async (url, init) => {
-    if (!isAnthropic(init) && !String(url).includes("v1beta")) return new Response(null, { status: 503 })
+    if (!isAnthropic(init) && !String(url).includes("v1beta") && !String(url).includes("client_version")) return new Response(null, { status: 503 })
     await pending(url, init).catch(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20))
       completed++
@@ -208,7 +209,7 @@ test("主來源失敗時中止 metadata，等待所有請求結束後才 reject"
     throw new Error("aborted")
   }
   await assert.rejects(fetchCatalog(config, { fetch: request }), /HTTP 503/)
-  assert.equal(completed, 2)
+  assert.equal(completed, 3)
 })
 
 test("外部 signal 中止所有進行中的請求", async () => {
@@ -219,5 +220,61 @@ test("外部 signal 中止所有進行中的請求", async () => {
   } })
   controller.abort()
   await assert.rejects(task)
-  assert.equal(aborted, 3)
+  assert.equal(aborted, 4)
+})
+
+test("Codex 依 slug 配對，保留 levels 與 default，不使用額外模型或其他欄位", async () => {
+  const primary = await fixture("openai")
+  const codex = await fixture("codex")
+  const raw = await fetchCatalog(config, { fetch: async (url) => json(String(url).includes("client_version")
+    ? { ...codex, apiKey: "must-not-persist", models: [...codex.models, { slug: "codex-only", supported_reasoning_levels: [] }] }
+    : String(url).includes("v1beta") ? {} : primary) })
+  assert.equal(raw.models.length, 9)
+  assert.deepEqual(raw.models.find((m) => m.id === "gemini-3-flash")?.reasoning_levels, ["minimal", "low", "medium", "high"])
+  assert.equal(raw.models.find((m) => m.id === "gemini-3-flash")?.default_reasoning_level, "medium")
+  assert.deepEqual(raw.models.find((m) => m.id === "claude-sonnet-5-5-high")?.reasoning_levels, [])
+  assert.deepEqual(raw.models.find((m) => m.id === "gpt-oss-120b-medium")?.reasoning_levels, ["low", "medium", "high", "xhigh"])
+  assert.doesNotMatch(JSON.stringify(raw), /must-not-persist|apiKey|codex-only/)
+})
+
+test("Codex 失敗、缺欄位或錯誤欄位時沿用上次成功資料", async () => {
+  const previous = { models: [{ id: "a", owned_by: "antigravity", reasoning_levels: ["low", "medium", "high"], default_reasoning_level: "medium" }] }
+  for (const response of [
+    () => { throw new Error("offline") },
+    () => new Response(null, { status: 503 }),
+    () => new Response("not JSON"),
+    () => json({}),
+    () => json({ models: [] }),
+    () => json({ models: [{ slug: "a" }] }),
+    () => json({ models: [{ slug: "a", supported_reasoning_levels: [{ effort: 42 }], default_reasoning_level: "low" }] }),
+    () => json({ models: [{ slug: "a", supported_reasoning_levels: [{ effort: "low" }] }] }),
+    () => json({ models: [{ slug: "a", supported_reasoning_levels: [{ effort: "low" }], default_reasoning_level: "high" }] }),
+  ]) {
+    const raw = await fetchCatalog(config, { previous, fetch: async (url) => String(url).includes("client_version")
+      ? response() : json({ data: [{ id: "a", owned_by: "antigravity" }] }) })
+    assert.deepEqual(raw.models, previous.models)
+  }
+})
+
+test("Codex 明確空清單清除舊 default，正規化順序與重複等級", async () => {
+  const previous = { models: [{ id: "a", owned_by: "antigravity", reasoning_levels: ["low"], default_reasoning_level: "low" }] }
+  const run = (levels: unknown[], defaultLevel?: string) => fetchCatalog(config, { previous, fetch: async (url) => json(String(url).includes("client_version")
+    ? { models: [{ slug: "a", supported_reasoning_levels: levels, ...(defaultLevel ? { default_reasoning_level: defaultLevel } : {}) }] }
+    : { data: [{ id: "a", owned_by: "antigravity" }] }) })
+  const empty = await run([])
+  assert.deepEqual(empty.models[0].reasoning_levels, [])
+  assert.equal(empty.models[0].default_reasoning_level, undefined)
+  const sorted = await run([{ effort: " HIGH " }, { effort: "low" }, { effort: "LOW" }], " LOW ")
+  assert.deepEqual(sorted.models[0].reasoning_levels, ["low", "high"])
+  assert.equal(sorted.models[0].default_reasoning_level, "low")
+})
+
+test("Codex timeout 沿用已知思考 metadata", async () => {
+  const keepAlive = setInterval(() => {}, 1000)
+  const previous = { models: [{ id: "a", owned_by: "antigravity", reasoning_levels: [], default_reasoning_level: undefined }] }
+  try {
+    const raw = await fetchCatalog({ ...config, timeoutMs: 15 }, { previous, fetch: async (url, init) => String(url).includes("client_version")
+      ? pending(url, init) : json({ data: [{ id: "a", owned_by: "antigravity" }] }) })
+    assert.deepEqual(raw.models, previous.models)
+  } finally { clearInterval(keepAlive) }
 })

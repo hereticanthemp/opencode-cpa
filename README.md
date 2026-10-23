@@ -7,6 +7,7 @@
 - 從 CPA 動態抓取模型列表，並在啟動時與每 N 分鐘自動更新。
 - 只註冊 `owned_by: antigravity` 的模型。
 - 使用 Google Gemini 原生格式（`/v1beta/models/{id}:streamGenerateContent`），不用 OpenAI compatible。
+- 模型選單提供思考等級 variants，預設要求顯示思考內容。
 - CPA 離線時使用上次的 cache。
 
 ## 需求
@@ -80,12 +81,40 @@ CPA URL 依下表選擇。credential 未提供網址時，才使用靜態設定�
 opencode run -m cpa/gemini-3-flash "..."
 ```
 
+### 思考等級與思考內容
+
+在 OpenChamber／TUI 的模型選單選擇 variant，或在 CLI 的模型 id 後加上 `#<等級>`：
+
+```sh
+opencode run --thinking -m cpa/gemini-3-flash#low "..."
+```
+
+- 未選 variant（default）時，只送出 `thinkingConfig: { includeThoughts: true }`，由 CPA 與模型決定思考等級。
+- 選 variant 時，送出 `includeThoughts: true` 與對應的 `thinkingLevel`。不提供 `none`。
+- 等級取自 CPA Codex 格式列表，不依模型名稱判斷。metadata 暫時失敗或缺欄位時，沿用上次成功資料。
+- 以下是目前 CPA 回報的結果，實際選單仍以動態列表為準：
+
+| 模型 | variants |
+| --- | --- |
+| Gemini 3 Flash、3.1／3.5 Flash Lite | minimal、low、medium、high |
+| Gemini 3.8 Flash High、4 Argon High | low、medium、high |
+| Gemini 3.1 Flash Image | minimal、high |
+| Claude Opus／Sonnet 5.5 High | low、medium、high（由 CPA 轉成 budget） |
+| GPT-OSS 120B Medium | 不提供 variants |
+
+Claude 的 Codex 等級清單明確為空。plugin 不硬編 Claude 前綴或 budget 範圍，而是送出 low／medium／high，讓 CPA 轉為 1024／8192／24576 並套用模型限制。這也避開 opencode 對直接指定 budget 的輸出 token 限制。
+
+Claude 使用自適應思考。簡單問題可能沒有思考內容；`includeThoughts` 不是強制產生思考的指令。Gemini default 也可能不顯示思考。CLI 需加 `--thinking` 才顯示回傳的思考內容。
+
+GPT-OSS 的 registry 沒有 thinking 區段，CPA 會移除送給它的 thinkingConfig。Codex 顯示的等級來自預設模板，不代表可控制思考。Codex 沒有直接標示等級來源，因此 plugin 採保守判斷：只接受 minimal／low／medium／high（排除 none），且包含 medium 時預設等級必須為 medium。含 xhigh 等其他等級或預設值不符合此規則時，不提供 variants。沒有 metadata 時也不猜測能力。
+
 ## 運作方式
 
 CPA 端點用途：
 - 一般 `/v1/models`：主來源。決定真實模型 id 與 `owned_by` 渠道。此請求不帶 `anthropic-version` 標頭；只有此主來源失敗會讓整體流程失敗。
 - Anthropic 格式 `/v1/models`：請求帶 `anthropic-version` 標頭。補充模型名稱與 token 上限，並解碼 CPA 的 `claude-fable-5-dd-` cloaking。
 - Google 格式 `/v1beta/models`：補充模型的 modalities（輸入與輸出支援能力）。
+- Codex 格式 `/v1/models?client_version=0.143.0`：第 4 個平行請求。補充 `supported_reasoning_levels[].effort` 與 `default_reasoning_level`。固定版本避免新版 Codex 模板引入 max／ultra。
 
 認證：
 - plugin 註冊 `cpa` integration，名稱為 CLIProxyAPI。支援 API key 與 `CPA_API_KEY` 環境變數。
@@ -107,7 +136,7 @@ CPA 端點用途：
 cache 機制：
 - cache 位置為 `$XDG_DATA_HOME/opencode-cpa/models-<source>.json`。未設定環境變數時，目錄為 `~/.local/share/opencode-cpa`。
 - `<source>` 是正規化 baseURL 的 SHA-256 前 16 碼。不同來源使用不同檔案，同來源的 instance 共用快取。
-- 快取格式版本為 3。舊版 `models.json` 不再讀取。
+- 快取格式版本為 4，包含思考等級與預設等級。舊版本快取與舊版 `models.json` 不再讀取。
 - cache 只存正規化 CPA 中繼資料，不存 API key。
 - CPA 離線時，plugin 會使用上次儲存的 cache。
 - metadata 暫時失敗時，同 id 模型沿用已知名稱、token 上限與 modalities。新模型才使用預設值。
@@ -131,7 +160,7 @@ provider 套件宣告：
 
 - 只支援 antigravity 渠道。
 - 不顯示剩餘額度。
-- 沒有提供 thinking variants。
+- Codex 列表不提供 thinking 來源與 budget 範圍，plugin 使用上述保守判斷，可能略過無法確認的等級。
 - 未發布到 npm。
 
 ## 開發

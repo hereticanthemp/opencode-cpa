@@ -119,7 +119,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
         path = nextPath
         catalog = cached
         fingerprint = catalogFingerprint(cached ? buildModels(cached, config) : [])
-        writtenFingerprint = cached ? fingerprint : undefined
+        writtenFingerprint = cached ? catalogFingerprint(cached.models) : undefined
         if (cached) cachedReady()
         // 切換來源後只發布新網址的快取；沒有快取時移除舊 provider。
         if (registered) await ctx.provider.reload()
@@ -137,10 +137,11 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       catalog = next
       fingerprint = nextFingerprint
       if (disposed) return
-      if (writtenFingerprint !== nextFingerprint) {
+      const cacheFingerprint = catalogFingerprint(next.models)
+      if (writtenFingerprint !== cacheFingerprint) {
         const task = writing = (dependencies.writeCache ?? writeCache)(next, requestPath)
         try {
-          if (await task) { if (current()) writtenFingerprint = nextFingerprint }
+          if (await task) { if (current()) writtenFingerprint = cacheFingerprint }
           else if (!disposed) log("模型快取寫入失敗。")
         } finally {
           if (writing === task) writing = undefined

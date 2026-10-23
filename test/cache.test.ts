@@ -17,7 +17,7 @@ test("cache 讀寫、覆寫、並行原子寫入，且只保留模型中繼資�
     const catalog = { models: [{ id: "a", owned_by: "antigravity", input: ["text"] }], apiKey: "must-not-persist" }
     assert.equal(await readCache(path), null)
     assert.equal(await writeCache(catalog, path), true)
-    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 3)
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 4)
     assert.deepEqual(await readCache(path), { models: catalog.models })
     assert.doesNotMatch(await readFile(path, "utf8"), /must-not-persist|apiKey/)
     const next: CPACatalog = { models: [{ id: "b", max_tokens: 100 }] }
@@ -35,10 +35,12 @@ test("cache 壞檔、錯誤版本與無效模型回 null；寫入失敗回 false
   const directory = await mkdtemp(join(process.cwd(), "test/.cache-test-"))
   try {
     const path = join(directory, "models.json")
-    for (const text of ["not json", "null", "{}", '{"version":2,"catalog":{"models":[]}}',
+    for (const text of ["not json", "null", "{}", '{"version":2,"catalog":{"models":[]}}', '{"version":3,"catalog":{"models":[]}}',
       '{"version":1,"catalog":{"models":[{"id":"claude-fable-5-dd-a","owned_by":"antigravity"}]}}',
-      '{"version":3,"catalog":{"models":[{}]}}', '{"version":3,"catalog":{"models":[{"id":"a","max_tokens":-1}]}}',
-      '{"version":3,"catalog":{"models":[{"id":"a","input":[42]}]}}']) {
+      '{"version":4,"catalog":{"models":[{}]}}', '{"version":4,"catalog":{"models":[{"id":"a","max_tokens":-1}]}}',
+      '{"version":4,"catalog":{"models":[{"id":"a","input":[42]}]}}',
+      '{"version":4,"catalog":{"models":[{"id":"a","reasoning_levels":[42]}]}}',
+      '{"version":4,"catalog":{"models":[{"id":"a","default_reasoning_level":42}]}}']) {
       await writeFile(path, text)
       assert.equal(await readCache(path), null)
     }
@@ -63,5 +65,21 @@ test("兩個 CPA baseURL 共用 XDG 目錄時不共用快取", async () => {
     await writeCache({ models: [{ id: "b" }] }, b)
     assert.equal((await readCache(a))?.models[0].id, "a")
     assert.equal((await readCache(b))?.models[0].id, "b")
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test("快取版本 4 保留思考 metadata（含空等級），丟棄額外欄位", async () => {
+  const directory = await mkdtemp(join(process.cwd(), "test/.cache-test-"))
+  try {
+    const path = join(directory, "models.json")
+    await writeCache({ models: [
+      { id: "levels", reasoning_levels: ["high", "low", "LOW"], default_reasoning_level: " LOW ", apiKey: "must-not-persist" },
+      { id: "budget", reasoning_levels: [] },
+    ] } as CPACatalog, path)
+    assert.deepEqual(await readCache(path), { models: [
+      { id: "levels", reasoning_levels: ["low", "high"], default_reasoning_level: "low" },
+      { id: "budget", reasoning_levels: [] },
+    ] })
+    assert.doesNotMatch(await readFile(path, "utf8"), /apiKey|must-not-persist/)
   } finally { await rm(directory, { recursive: true, force: true }) }
 })

@@ -34,7 +34,7 @@ test("provider 與模型使用有效 credential 網址、Core Google package，s
   const models = buildModels({ models: [{ id: "a", owned_by: "antigravity" }] }, effective)
   for (const info of [provider, ...models]) {
     assert.equal(info.package, "@opencode/ai/providers/google")
-    assert.deepEqual(info.settings, { baseURL: "https://credential.example/proxy/v1beta" })
+    assert.deepEqual(info.settings, { baseURL: "https://credential.example/proxy/v1beta", ...(info === provider ? {} : { thinkingConfig: { includeThoughts: true } }) })
     assert.equal(info.settings?.apiKey, undefined)
   }
 })
@@ -49,7 +49,7 @@ test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使
     assert.equal(model.providerID, "cpa")
     assert.equal(model.package, "@opencode/ai/providers/google")
     assert.equal(model.settings?.apiKey, undefined)
-    assert.deepEqual(model.settings, { baseURL: "http://localhost:8317/v1beta" })
+    assert.deepEqual(model.settings, { baseURL: "http://localhost:8317/v1beta", thinkingConfig: { includeThoughts: true } })
     assert.deepEqual(model.capabilities, { tools: true, input: ["text"], output: ["text"] })
     assert.deepEqual(model.cost, [])
     assert.deepEqual(model.variants, [])
@@ -87,4 +87,44 @@ test("catalog 排序與 fingerprint 不受來源順序、欄位順序或 modalit
   assert.equal(catalogFingerprint(first), catalogFingerprint([...second].reverse().map((model) => ({ name: model.name, ...model }))))
   assert.notEqual(catalogFingerprint(first), catalogFingerprint([{ ...first[0], name: "changed" }, first[1]]))
   assert.deepEqual(raw.models[0].input, ["text", "image"])
+})
+
+test("Codex metadata 產生各類 variants 與預設思考內容，schema 編碼不含 key", async () => {
+  const codex = JSON.parse(await readFile(new URL("./fixtures/codex-models.json", import.meta.url), "utf8"))
+  const primary = JSON.parse(await readFile(new URL("./fixtures/openai-models.json", import.meta.url), "utf8"))
+  const raw = await fetchCatalog(config, { apiKey: "private-test-key", fetch: async (url) => Response.json(String(url).includes("client_version") ? codex : primary) })
+  const models = buildModels(raw, config)
+  const variants = Object.fromEntries(models.map((m) => [m.id, m.variants.map((v) => v.id)]))
+  assert.deepEqual(variants["gemini-3-flash"], ["minimal", "low", "medium", "high"])
+  assert.deepEqual(variants["gemini-3.8-flash-high"], ["low", "medium", "high"])
+  assert.deepEqual(variants["gemini-3.1-flash-image"], ["minimal", "high"])
+  assert.deepEqual(variants["claude-sonnet-5-5-high"], ["low", "medium", "high"])
+  assert.deepEqual(variants["gpt-oss-120b-medium"], [])
+  for (const m of models) {
+    assert.deepEqual(m.settings, { baseURL: "http://localhost:8317/v1beta", thinkingConfig: { includeThoughts: true } })
+    for (const variant of m.variants) {
+      assert.notEqual(variant.id, "none")
+      assert.deepEqual(variant.settings, { thinkingConfig: { includeThoughts: true, thinkingLevel: variant.id } })
+    }
+    assert.doesNotMatch(JSON.stringify(Schema.encodeSync(Model.Info)(m)), /private-test-key|apiKey/)
+  }
+})
+
+test("不依模型名稱推斷；未知或模板等級不產生 variants，沒有 metadata 也不猜測", () => {
+  const raw: CPACatalog = { models: [
+    { id: "budget-model-without-family-prefix", reasoning_levels: [] },
+    { id: "actual-levels", reasoning_levels: ["high", "low", "medium"], default_reasoning_level: "medium" },
+    { id: "template-extended", reasoning_levels: ["low", "medium", "high", "xhigh"], default_reasoning_level: "medium" },
+    { id: "template-default", reasoning_levels: ["low", "medium", "high"], default_reasoning_level: "low" },
+    { id: "none-only", reasoning_levels: ["none"], default_reasoning_level: "none" },
+    { id: "claude-name-is-not-evidence" },
+  ].map((m) => ({ ...m, owned_by: "antigravity" })) }
+  const models = buildModels(raw, config)
+  const byID = Object.fromEntries(models.map((m) => [m.id, m.variants.map((v) => v.id)]))
+  assert.deepEqual(byID["budget-model-without-family-prefix"], ["low", "medium", "high"])
+  assert.deepEqual(byID["actual-levels"], ["low", "medium", "high"])
+  for (const id of ["template-extended", "template-default", "none-only", "claude-name-is-not-evidence"]) assert.deepEqual(byID[id], [])
+  const changed = models.map((m) => m.id === "actual-levels" ? { ...m, variants: [] } : m)
+  assert.notEqual(catalogFingerprint(models), catalogFingerprint(changed))
+  assert.equal(catalogFingerprint(models), catalogFingerprint(buildModels({ models: [...raw.models].reverse() }, config)))
 })

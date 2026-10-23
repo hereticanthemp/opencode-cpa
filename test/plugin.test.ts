@@ -164,13 +164,13 @@ test("有快取時先註冊，背景內容變更才 reload，相同內容不 rel
   await f.start()
   assert.equal(f.registered, true)
   assert.equal(f.added()[0].models[0].id, "cached-model")
-  await until(() => f.requests === 3)
+  await until(() => f.requests === 4)
   gate.resolve()
   await until(() => f.reloads === 1)
   assert.equal(f.added()[0].models[0].id, "new-model")
   assert.equal((await readCache(f.path))?.models[0].id, "new-model")
   f.tick()
-  await until(() => f.requests === 6)
+  await until(() => f.requests === 8)
   await delay(20)
   assert.equal(f.reloads, 1)
 })
@@ -191,7 +191,7 @@ test("無快取時等待抓取、寫快取，transform 產出正確設定與模�
   assert.equal(info.settings?.apiKey, undefined)
   assert.equal(info.settings?.baseURL, "http://localhost:8317/v1beta")
   assert.equal(models[0].package, "@opencode/ai/providers/google")
-  assert.deepEqual(models[0].settings, { baseURL: "http://localhost:8317/v1beta" })
+  assert.deepEqual(models[0].settings, { baseURL: "http://localhost:8317/v1beta", thinkingConfig: { includeThoughts: true } })
   assert.doesNotMatch(await readFile(f.path, "utf8"), /apiKey|test-only-key/)
   assert.equal(f.reloads, 0)
   assert.equal(f.unrefs, 1)
@@ -220,7 +220,7 @@ test("更新不重疊，失敗保留舊目錄", async (t) => {
   f.tick()
   f.tick()
   f.tick()
-  await until(() => f.requests === 6)
+  await until(() => f.requests === 8)
   gate.resolve()
   await until(() => f.logs.length === 1)
   assert.equal(f.reloads, 0)
@@ -232,14 +232,14 @@ test("cleanup 停止 interval、dispose registration，忽略晚到結果", asyn
   const gate = deferred()
   f.gate = gate.promise
   await f.start()
-  await until(() => f.requests === 3)
+  await until(() => f.requests === 4)
   await f.stop()
   assert.equal(f.cancelled, true)
   assert.equal(f.disposals, 1)
   f.tick()
   gate.resolve()
   await delay(30)
-  assert.equal(f.requests, 3)
+  assert.equal(f.requests, 4)
   assert.equal(f.reloads, 0)
   assert.equal((await readCache(f.path))?.models[0].id, "cached-model")
   assert.deepEqual(f.added(), [])
@@ -295,7 +295,7 @@ test("冷啟動主來源超出預算時中止請求並註冊空 transform", asyn
   })
   await f.start()
   assert.deepEqual(f.added(), [])
-  await until(() => aborted === 3)
+  await until(() => aborted === 4)
   assert.equal(f.reloads, 0)
 })
 
@@ -324,7 +324,7 @@ test("cleanup 中止背景請求並 dispose integration", async (t) => {
   await f.start()
   await delay(5)
   await f.stop()
-  await until(() => aborted === 3)
+  await until(() => aborted === 4)
   assert.equal(f.integrationDisposed, true)
   assert.equal(f.reloads, 0)
 })
@@ -369,16 +369,16 @@ test("每次更新重新讀 connection；沒有 connection 時不帶認證，讀
   const f = await fixture(t)
   f.key = undefined
   await f.start()
-  assert.equal(f.requests, 3)
+  assert.equal(f.requests, 4)
   f.key = "changed-key"
   f.tick()
-  await until(() => f.requests === 6)
+  await until(() => f.requests === 8)
   await delay(20)
   f.connectionFails = true
   f.tick()
   await until(() => f.logs.length === 1)
   await delay(20)
-  assert.equal(f.requests, 6)
+  assert.equal(f.requests, 8)
   assert.deepEqual(f.logs, ["credential 讀取失敗；保留目前來源，本次不抓取模型。"])
 })
 
@@ -425,15 +425,15 @@ test("只在 cpa credential 切換時更新，cleanup 後停止訂閱", async (t
   await f.start()
   f.emit("other")
   await delay(10)
-  assert.equal(f.requests, 3)
+  assert.equal(f.requests, 4)
   f.id = "after-credential"
   f.emit("cpa")
   await until(() => f.reloads === 1)
-  assert.equal(f.requests, 6)
+  assert.equal(f.requests, 8)
   await f.stop()
   f.emit("cpa")
   await delay(10)
-  assert.equal(f.requests, 6)
+  assert.equal(f.requests, 8)
 })
 
 test("更新進行中收到 credential 事件時，合併成一次後續更新", async (t) => {
@@ -442,15 +442,15 @@ test("更新進行中收到 credential 事件時，合併成一次後續更新",
   const gate = deferred()
   f.gate = gate.promise
   f.tick()
-  await until(() => f.requests === 6)
+  await until(() => f.requests === 8)
   f.emit("cpa")
   await delay(5)
   f.emit("cpa")
   await delay(5)
   gate.resolve()
-  await until(() => f.requests === 9)
+  await until(() => f.requests === 12)
   await delay(20)
-  assert.equal(f.requests, 9)
+  assert.equal(f.requests, 12)
 })
 
 test("存在但空白的 key 顯示 needs_auth、固定 log，且模型列表不帶認證", async (t) => {
@@ -460,7 +460,7 @@ test("存在但空白的 key 顯示 needs_auth、固定 log，且模型列表不
     f.integration.connection.active = async () => connection
     f.key = key
     await f.start()
-    assert.equal(f.requests, 3)
+    assert.equal(f.requests, 4)
     assert.deepEqual(f.statuses, [{
       integrationID: "cpa", connection,
       status: { status: "needs_auth", message: "CLIProxyAPI API key is empty. Enter a valid key." },
@@ -468,7 +468,7 @@ test("存在但空白的 key 顯示 needs_auth、固定 log，且模型列表不
     assert.deepEqual(f.logs, ["CLIProxyAPI API key 為空；請重新輸入有效的 key。模型列表請求不帶認證。"])
     f.key = "valid-key"
     f.tick()
-    await until(() => f.requests === 6)
+    await until(() => f.requests === 8)
     assert.equal(f.statuses.at(-1)?.status, undefined)
     assert.equal(f.statuses.length, 2)
   }
@@ -478,7 +478,7 @@ test("沒有 connection 時不回報空 key 警告", async (t) => {
   const f = await fixture(t)
   f.key = undefined
   await f.start()
-  assert.equal(f.requests, 3)
+  assert.equal(f.requests, 4)
   assert.deepEqual(f.statuses, [])
   assert.deepEqual(f.logs, [])
 })
@@ -488,7 +488,7 @@ test("UI status 回報失敗時，仍拒絕用空白 key 抓取模型列表", as
   f.key = ""
   f.integration.connection.status = async () => { throw new Error("sensitive-status") }
   await f.start()
-  assert.equal(f.requests, 3)
+  assert.equal(f.requests, 4)
   assert.equal(f.logs.length, 1)
   assert.doesNotMatch(f.logs.join(""), /sensitive-status/)
 })
@@ -514,7 +514,7 @@ test("冷啟動第一次抓取期間切換 credential，停用 interval 仍用�
     return Response.json({ data: [{ id: "new-key-model", owned_by: "antigravity" }] })
   }
   const starting = f.start()
-  await until(() => keys.length === 3)
+  await until(() => keys.length === 4)
   f.key = "new-key"
   f.emit("cpa")
   await delay(5)
@@ -522,8 +522,8 @@ test("冷啟動第一次抓取期間切換 credential，停用 interval 仍用�
   await starting
   await until(() => f.added()[0]?.models[0]?.id === "new-key-model")
   assert.deepEqual(keys, [
-    "Bearer test-only-key", "Bearer test-only-key", "Bearer test-only-key",
-    "Bearer new-key", "Bearer new-key", "Bearer new-key",
+    "Bearer test-only-key", "Bearer test-only-key", "Bearer test-only-key", "Bearer test-only-key",
+    "Bearer new-key", "Bearer new-key", "Bearer new-key", "Bearer new-key",
   ])
   assert.equal(f.unrefs, 0)
 })
@@ -807,4 +807,18 @@ test("冷啟動取消後空 transform 已註冊，晚到的新來源快取必須
   assert.equal(f.added()[0].models[0].id, "late-cache")
   assert.equal(f.added()[0].info.settings?.baseURL, `${root}/v1beta`)
   old.resolve()
+})
+
+test("default reasoning metadata 改變但 variants 相同時，仍更新快取且不 reload", async (t) => {
+  const f = await fixture(t)
+  let defaultLevel = "low"
+  f.dependencies.fetch = async (url) => Response.json(String(url).includes("client_version")
+    ? { models: [{ slug: "a", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }], default_reasoning_level: defaultLevel }] }
+    : { data: [{ id: "a", owned_by: "antigravity" }] })
+  await f.start()
+  assert.equal((await readCache(f.path))?.models[0].default_reasoning_level, "low")
+  defaultLevel = "high"
+  f.tick()
+  await until(async () => (await readCache(f.path))?.models[0].default_reasoning_level === "high")
+  assert.equal(f.reloads, 0)
 })

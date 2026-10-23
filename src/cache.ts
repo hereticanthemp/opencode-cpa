@@ -12,7 +12,7 @@ export function cachePath(env: NodeJS.ProcessEnv = process.env, home = homedir()
 export async function readCache(path = cachePath()): Promise<CPACatalog | null> {
   try {
     const value: unknown = JSON.parse(await readFile(path, "utf8"))
-    if (typeof value !== "object" || value === null || !("version" in value) || value.version !== 3
+    if (typeof value !== "object" || value === null || !("version" in value) || value.version !== 4
       || !("catalog" in value) || !isCatalog(value.catalog)) return null
     return { models: value.catalog.models.map((model) => normalizeModel(model)!) }
   } catch {
@@ -27,7 +27,7 @@ export async function writeCache(catalog: CPACatalog, path = cachePath()): Promi
     if (!isCatalog(catalog)) return false
     const clean = { models: catalog.models.map((model) => normalizeModel(model)!) }
     await mkdir(dirname(path), { recursive: true })
-    await writeFile(temporary, JSON.stringify({ version: 3, catalog: clean }), { flag: "wx", mode: 0o600 })
+    await writeFile(temporary, JSON.stringify({ version: 4, catalog: clean }), { flag: "wx", mode: 0o600 })
     await rename(temporary, path)
     return true
   } catch {

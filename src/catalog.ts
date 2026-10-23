@@ -30,6 +30,18 @@ function modalities(values: string[] | undefined): string[] {
   return result.length ? result : ["text"]
 }
 
+function variants(model: CPACatalog["models"][number]): Model.Info["variants"] {
+  const levels = model.reasoning_levels
+  if (!levels) return []
+  const native = ["minimal", "low", "medium", "high"]
+  // Codex 沒有來源旗標；拒絕非 Gemini 等級與不符合 CPA thinking 預設規則的模板資料。
+  if (levels.some((level) => level !== "none" && !native.includes(level))) return []
+  if (levels.includes("medium") && model.default_reasoning_level !== "medium") return []
+  // CPA 對明確的空 levels 清單使用 budget 路徑；讓 CPA 自行轉換與限制 budget。
+  const selected = levels.length === 0 ? ["low", "medium", "high"] : native.filter((level) => levels.includes(level))
+  return selected.map((level) => ({ id: Model.VariantID.make(level), settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: level } } }))
+}
+
 export function buildModels(catalog: CPACatalog, config: Config): Model.Info[] {
   return catalog.models.flatMap((model) => {
     const channel = model.owned_by && Object.hasOwn(channels, model.owned_by) ? channels[model.owned_by] : undefined
@@ -39,7 +51,8 @@ export function buildModels(catalog: CPACatalog, config: Config): Model.Info[] {
       ...defaults,
       name: model.display_name || model.id,
       package: channel.package,
-      settings: { baseURL: `${config.baseURL}${channel.path}` },
+      settings: { baseURL: `${config.baseURL}${channel.path}`, thinkingConfig: { includeThoughts: true } },
+      variants: variants(model),
       limit: {
         context: model.max_input_tokens ?? defaults.limit.context,
         output: model.max_tokens ?? defaults.limit.output,
@@ -62,6 +75,6 @@ function stable(value: unknown): string {
   return JSON.stringify(value) ?? "null"
 }
 
-export function catalogFingerprint(models: readonly Model.Info[]): string {
+export function catalogFingerprint(models: readonly { readonly id: string }[]): string {
   return createHash("sha256").update(stable([...models].sort((a, b) => compare(a.id, b.id) || compare(stable(a), stable(b))))).digest("hex")
 }

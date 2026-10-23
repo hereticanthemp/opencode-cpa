@@ -9,6 +9,8 @@ export interface CPAModel {
   max_tokens?: number
   input?: string[]
   output?: string[]
+  reasoning_levels?: string[]
+  default_reasoning_level?: string
 }
 
 export interface CPACatalog {
@@ -21,6 +23,35 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function strings(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined
+}
+
+const effortOrder = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+export function reasoningLevels(value: unknown): string[] | undefined {
+  const values = strings(value)
+  if (!values || values.some((item) => !item.trim())) return
+  return [...new Set(values.map((item) => item.trim().toLowerCase()))].sort((a, b) => {
+    const rank = (level: string) => effortOrder.includes(level) ? effortOrder.indexOf(level) : effortOrder.length
+    return rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0)
+  })
+}
+
+// 固定在 extended levels 引入前的 Codex 版本；不把模板的 max／ultra 當成 Gemini 能力。
+export const codexModelsPath = "/v1/models?client_version=0.143.0"
+
+function reasoningMetadata(value: unknown): Pick<CPAModel, "reasoning_levels" | "default_reasoning_level"> | undefined {
+  if (!record(value) || !Array.isArray(value.supported_reasoning_levels)) return
+  const entries = value.supported_reasoning_levels
+  if (!entries.every((entry: unknown) => record(entry) && typeof entry.effort === "string")) return
+  const levels = reasoningLevels(entries.map((entry) => entry.effort))
+  if (!levels) return
+  if (levels.length === 0) {
+    if (value.default_reasoning_level !== undefined) return
+    return { reasoning_levels: [], default_reasoning_level: undefined }
+  }
+  if (typeof value.default_reasoning_level !== "string") return
+  const defaultLevel = value.default_reasoning_level.trim().toLowerCase()
+  if (!levels.includes(defaultLevel)) return
+  return { reasoning_levels: levels, default_reasoning_level: defaultLevel }
 }
 
 function limit(value: unknown): number | undefined {
@@ -38,6 +69,9 @@ export function normalizeModel(value: unknown): CPAModel | undefined {
     ...(limit(value.max_tokens) ? { max_tokens: limit(value.max_tokens) } : {}),
     ...(strings(value.input) ? { input: strings(value.input) } : {}),
     ...(strings(value.output) ? { output: strings(value.output) } : {}),
+    ...(reasoningLevels(value.reasoning_levels) ? { reasoning_levels: reasoningLevels(value.reasoning_levels) } : {}),
+    ...(typeof value.default_reasoning_level === "string" && value.default_reasoning_level.trim()
+      ? { default_reasoning_level: value.default_reasoning_level.trim().toLowerCase() } : {}),
   }
 }
 
@@ -47,6 +81,8 @@ export function isCatalog(value: unknown): value is CPACatalog {
     return ["owned_by", "display_name"].every((key) => item[key] === undefined || typeof item[key] === "string")
       && ["max_input_tokens", "max_tokens"].every((key) => item[key] === undefined || limit(item[key]) !== undefined)
       && ["input", "output"].every((key) => item[key] === undefined || strings(item[key]) !== undefined)
+      && (item.reasoning_levels === undefined || reasoningLevels(item.reasoning_levels) !== undefined)
+      && (item.default_reasoning_level === undefined || (typeof item.default_reasoning_level === "string" && Boolean(item.default_reasoning_level.trim())))
   })
 }
 
@@ -96,11 +132,20 @@ export async function fetchCatalog(config: Config, dependencies: {
   })
   const metadata = get("/v1/models", true).catch(() => undefined)
   const secondary = get("/v1beta/models").catch(() => undefined)
-  const [main, meta, extra] = await Promise.allSettled([primary, metadata, secondary])
+  const codex = get(codexModelsPath).catch(() => undefined)
+  const [main, meta, extra, reasoning] = await Promise.allSettled([primary, metadata, secondary, codex])
   if (main.status === "rejected") throw main.reason
   const models = main.value
   const anthropic = meta.status === "fulfilled" ? meta.value : undefined
   const google = extra.status === "fulfilled" ? extra.value : undefined
+  const codexModels = reasoning.status === "fulfilled" ? reasoning.value : undefined
+  const efforts = new Map<string, Pick<CPAModel, "reasoning_levels" | "default_reasoning_level">>()
+  if (record(codexModels) && Array.isArray(codexModels.models)) {
+    for (const item of codexModels.models) {
+      const metadata = reasoningMetadata(item)
+      if (record(item) && typeof item.slug === "string" && metadata) efforts.set(item.slug, metadata)
+    }
+  }
   const details = new Map<string, CPAModel>()
   if (record(anthropic) && Array.isArray(anthropic.data)) {
     for (const item of anthropic.data) {
@@ -127,6 +172,7 @@ export async function fetchCatalog(config: Config, dependencies: {
         ...(detail?.max_tokens ? { max_tokens: detail.max_tokens } : {}),
         ...(input ? { input } : {}),
         ...(output ? { output } : {}),
+        ...efforts.get(model.id),
       }
     }),
   }
