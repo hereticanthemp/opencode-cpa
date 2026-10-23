@@ -10,7 +10,7 @@ const config = parseConfig({ baseURL: "http://localhost:8317/v1/" }, {})
 
 test("provider 使用 Google 原生格式，認證可省略", () => {
   assert.deepEqual(buildProviderInfo(config), {
-    id: "cpa", name: "CLIProxyAPI", activation: "enabled", package: "@ai-sdk/google",
+    id: "cpa", name: "CLIProxyAPI", activation: "enabled", package: "@opencode/ai/providers/google",
     settings: { baseURL: "http://localhost:8317/v1beta" },
   })
   assert.equal(buildProviderInfo({ ...config, apiKey: "test-key" }).settings?.apiKey, "test-key")
@@ -24,7 +24,7 @@ test("catalog 依 owned_by 過濾、設定 per-model package 與 limits，並使
   for (const model of models) {
     assert.equal(model.modelID, model.id)
     assert.equal(model.providerID, "cpa")
-    assert.equal(model.package, "@ai-sdk/google")
+    assert.equal(model.package, "@opencode/ai/providers/google")
     assert.deepEqual(model.settings, { baseURL: "http://localhost:8317/v1beta" })
     assert.deepEqual(model.capabilities, { tools: true, input: ["text"], output: ["text"] })
     assert.deepEqual(model.cost, [])

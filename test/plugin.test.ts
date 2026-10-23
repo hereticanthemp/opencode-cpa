@@ -114,10 +114,10 @@ test("無快取時等待抓取、寫快取，transform 產出正確設定與模�
   assert.deepEqual(await readCache(f.path), catalog)
   assert.deepEqual(f.added(), [{ info: buildProviderInfo(config), models: buildModels(catalog, config) }])
   const { info, models } = f.added()[0]
-  assert.equal(info.package, "@ai-sdk/google")
+  assert.equal(info.package, "@opencode/ai/providers/google")
   assert.equal(info.settings?.apiKey, f.options.apiKey)
   assert.equal(info.settings?.baseURL, "http://localhost:8317/v1beta")
-  assert.equal(models[0].package, "@ai-sdk/google")
+  assert.equal(models[0].package, "@opencode/ai/providers/google")
   assert.deepEqual(models[0].settings, { baseURL: "http://localhost:8317/v1beta" })
   assert.doesNotMatch(await readFile(f.path, "utf8"), /apiKey|test-only-key/)
   assert.equal(f.reloads, 0)

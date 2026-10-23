@@ -27,7 +27,7 @@ npm test
 
 - `parseConfig(options, env)`：options 優先於環境變數。無效型別略過該來源。負數更新間隔回到 10 分鐘。
 - `fetchCatalog(config, { fetch })`：平行送出三個請求。一般 `/v1/models` 決定真實 id 與 `owned_by`；Anthropic 格式補名稱與 token 上限；Google 格式補 modalities。
-- `buildProviderInfo(config)`、`buildModels(catalog, config)`：僅保留 `owned_by: antigravity`，一律使用 `@ai-sdk/google` 與 `/v1beta`。
+- `buildProviderInfo(config)`、`buildModels(catalog, config)`：僅保留 `owned_by: antigravity`，一律使用 OpenCode 內建的 Google 原生套件 `@opencode/ai/providers/google`（等同 `@ai-sdk/google`）與 `/v1beta`。`ProviderEditor.add()` 不會改寫 `@ai-sdk/*` 名稱，所以不能直接寫 `@ai-sdk/google`。
 - `catalogFingerprint(models)`：依模型 id 與物件欄位排序，再計算 SHA-256。轉換時也會排序並去除重複 modalities。
 - `readCache(path?)`、`writeCache(catalog, path?)`：路徑可注入。讀取失敗回傳 `null`；寫入失敗回傳 `false`，由呼叫端決定通知方式。
 

@@ -3,8 +3,9 @@ import { Model, Provider } from "@opencode/schema"
 import type { Config } from "./config.js"
 import type { CPACatalog } from "./cpa-client.js"
 
+// ProviderEditor.add() 不會把 @ai-sdk/* 改寫成 OpenCode 內建套件，因此直接使用原生 specifier。
 export const channels: Readonly<Record<string, { package: string; path: string }>> = {
-  antigravity: { package: "@ai-sdk/google", path: "/v1beta" },
+  antigravity: { package: "@opencode/ai/providers/google", path: "/v1beta" },
 }
 const providerID = Provider.ID.make("cpa")
 
