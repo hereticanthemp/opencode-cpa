@@ -1,0 +1,13 @@
+{
+  "data": [
+    { "id": "z-claude", "owned_by": "antigravity", "display_name": "測試 Claude", "max_input_tokens": 800000, "max_tokens": 64000 },
+    { "id": "a-gpt-oss", "owned_by": "antigravity" },
+    { "id": "gemini-not-agy", "owned_by": "openai" },
+    { "id": "claude-not-agy", "owned_by": "anthropic" },
+    { "id": "missing-owner" },
+    { "id": "prototype-owner", "owned_by": "toString" },
+    { "owned_by": "antigravity" },
+    { "id": "", "owned_by": "antigravity" },
+    { "id": "invalid-limits", "owned_by": "antigravity", "display_name": "", "max_input_tokens": -1, "max_tokens": "64000" }
+  ]
+}

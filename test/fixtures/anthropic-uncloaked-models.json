@@ -1,0 +1,13 @@
+{
+  "data": [
+    { "id": "claude-opus-5-5-high", "display_name": "Claude Opus 5.5 (High)", "max_input_tokens": 1000000, "max_tokens": 128000, "owned_by": "antigravity" },
+    { "id": "claude-sonnet-5-5-high", "display_name": "Claude Sonnet 5.5 (High)", "max_input_tokens": 1000000, "max_tokens": 128000, "owned_by": "antigravity" },
+    { "id": "gpt-oss-120b-medium", "display_name": "GPT-OSS 120B (Medium)", "max_input_tokens": 114000, "max_tokens": 32768, "owned_by": "antigravity" },
+    { "id": "gemini-3-flash", "display_name": "Gemini 3 Flash", "max_input_tokens": 1048576, "max_tokens": 65536, "owned_by": "antigravity" },
+    { "id": "gemini-3.1-flash-image", "display_name": "Gemini 3.1 Flash Image", "max_input_tokens": 200000, "max_tokens": 64000, "owned_by": "antigravity" },
+    { "id": "gemini-3.1-flash-lite", "display_name": "Gemini 3.1 Flash Lite", "max_input_tokens": 1048576, "max_tokens": 65535, "owned_by": "antigravity" },
+    { "id": "gemini-3.5-flash-lite", "display_name": "Gemini 3.5 Flash Lite", "max_input_tokens": 1048576, "max_tokens": 65535, "owned_by": "antigravity" },
+    { "id": "gemini-3.8-flash-high", "display_name": "Gemini 3.8 Flash", "max_input_tokens": 1048576, "max_tokens": 65536, "owned_by": "antigravity" },
+    { "id": "gemini-4-argon-high", "display_name": "Gemini 4 Argon", "max_input_tokens": 1048576, "max_tokens": 1048576, "owned_by": "antigravity" }
+  ]
+}
