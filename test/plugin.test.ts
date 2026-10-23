@@ -4,6 +4,8 @@ import { join } from "node:path"
 import test, { type TestContext } from "node:test"
 import { setTimeout as delay } from "node:timers/promises"
 import type { Plugin } from "@opencode/plugin"
+import { Credential } from "@opencode/schema"
+import { Context, Effect, PubSub, Stream } from "effect"
 import { cachePath, readCache, writeCache } from "../src/cache.js"
 import { buildModels, buildProviderInfo } from "../src/catalog.js"
 import { parseConfig } from "../src/config.js"
@@ -52,6 +54,8 @@ async function fixture(t: TestContext, cached?: string) {
   let connectionGate: Promise<void> | undefined
   let eventListener: ((event: unknown) => void) | undefined
   let integrationDisposed = false
+  let subscribed = false
+  const statuses: Parameters<Plugin.Context["integration"]["connection"]["status"]>[0][] = []
   const integration = {
     async transform(cb: Parameters<Plugin.Context["integration"]["transform"]>[0]) {
       const methods: unknown[] = []
@@ -77,13 +81,15 @@ async function fixture(t: TestContext, cached?: string) {
         assert.equal(id, "cpa")
         await connectionGate
         if (connectionFails) throw new Error("sensitive-connection")
-        return key ? { type: "env" as const, name: "CPA_API_KEY" } : undefined
+        return key !== undefined ? { type: "env" as const, name: "CPA_API_KEY" } : undefined
       },
-      async resolve() { return key ? { type: "key" as const, key } : undefined },
+      async resolve() { return key !== undefined ? { type: "key" as const, key } : undefined },
+      async status(input) { statuses.push(input) },
     },
   } as Plugin.Context["integration"]
   const event = {
     async *subscribe({ signal }: { signal: AbortSignal }) {
+      subscribed = true
       while (!signal.aborted) {
         const value = await new Promise<unknown>((resolve) => {
           eventListener = resolve
@@ -96,10 +102,11 @@ async function fixture(t: TestContext, cached?: string) {
   const dependencies = {
     coldStartBudgetMs: 3_000,
     writeCache,
+    retryWait: async (ms: number, signal: AbortSignal) => { await delay(ms, undefined, { signal }) },
     env: { XDG_DATA_HOME: directory },
     log: (message: string) => { logs.push(message) },
     fetch: (async (_url, init) => {
-      assert.equal(new Headers(init?.headers).get("authorization"), key && !connectionFails ? `Bearer ${key}` : null)
+      assert.equal(new Headers(init?.headers).get("authorization"), key?.trim() && !connectionFails ? `Bearer ${key}` : null)
       requests++
       await gate
       return Response.json({ data: [{ id, owned_by: "antigravity" }, { id: "excluded", owned_by: "other" }] }, { status: fails ? 503 : 200 })
@@ -113,8 +120,9 @@ async function fixture(t: TestContext, cached?: string) {
   }
   t.after(async () => { await cleanup?.(); await rm(directory, { recursive: true, force: true }) })
   return {
-    path, options, dependencies, provider, integration, event, logs,
+    path, options, dependencies, provider, integration, event, logs, statuses,
     get integrationDisposed() { return integrationDisposed },
+    get subscribed() { return subscribed },
     set key(value: string | undefined) { key = value },
     set connectionFails(value: boolean) { connectionFails = value },
     set connectionGate(value: Promise<void> | undefined) { connectionGate = value },
@@ -432,4 +440,172 @@ test("更新進行中收到 credential 事件時，合併成一次後續更新",
   await until(() => f.requests === 9)
   await delay(20)
   assert.equal(f.requests, 9)
+})
+
+test("存在但空白的 key 顯示 needs_auth、固定 log，且模型列表不帶認證", async (t) => {
+  for (const key of ["", " \t "]) {
+    const f = await fixture(t)
+    const connection = { type: "credential" as const, id: Credential.ID.make("cred_empty"), label: "CLIProxyAPI", method: "key" as const }
+    f.integration.connection.active = async () => connection
+    f.key = key
+    await f.start()
+    assert.equal(f.requests, 3)
+    assert.deepEqual(f.statuses, [{
+      integrationID: "cpa", connection,
+      status: { status: "needs_auth", message: "CLIProxyAPI API key is empty. Enter a valid key." },
+    }])
+    assert.deepEqual(f.logs, ["CLIProxyAPI API key 為空；請重新輸入有效的 key。模型列表請求不帶認證。"])
+    f.key = "valid-key"
+    f.tick()
+    await until(() => f.requests === 6)
+    assert.equal(f.statuses.at(-1)?.status, undefined)
+    assert.equal(f.statuses.length, 2)
+  }
+})
+
+test("沒有 connection 時不回報空 key 警告", async (t) => {
+  const f = await fixture(t)
+  f.key = undefined
+  await f.start()
+  assert.equal(f.requests, 3)
+  assert.deepEqual(f.statuses, [])
+  assert.deepEqual(f.logs, [])
+})
+
+test("UI status 回報失敗時，仍拒絕用空白 key 抓取模型列表", async (t) => {
+  const f = await fixture(t)
+  f.key = ""
+  f.integration.connection.status = async () => { throw new Error("sensitive-status") }
+  await f.start()
+  assert.equal(f.requests, 3)
+  assert.equal(f.logs.length, 1)
+  assert.doesNotMatch(f.logs.join(""), /sensitive-status/)
+})
+
+test("冷啟動第一次抓取期間切換 credential，停用 interval 仍用新 key 重抓並註冊 provider", async (t) => {
+  const f = await fixture(t)
+  f.options.refreshIntervalMinutes = 0
+  const active = f.integration.connection.active.bind(f.integration.connection)
+  f.integration.connection.active = async (id) => {
+    assert.equal(f.subscribed, true, "讀 connection 前必須啟動訂閱")
+    return active(id)
+  }
+  const gate = deferred()
+  const keys: (string | null)[] = []
+  f.dependencies.fetch = async (_url, init) => {
+    assert.equal(f.subscribed, true)
+    const key = new Headers(init?.headers).get("authorization")
+    keys.push(key)
+    if (key === "Bearer test-only-key") {
+      await gate.promise
+      return new Response(null, { status: 401 })
+    }
+    return Response.json({ data: [{ id: "new-key-model", owned_by: "antigravity" }] })
+  }
+  const starting = f.start()
+  await until(() => keys.length === 3)
+  f.key = "new-key"
+  f.emit("cpa")
+  await delay(5)
+  gate.resolve()
+  await starting
+  await until(() => f.added()[0]?.models[0]?.id === "new-key-model")
+  assert.deepEqual(keys, [
+    "Bearer test-only-key", "Bearer test-only-key", "Bearer test-only-key",
+    "Bearer new-key", "Bearer new-key", "Bearer new-key",
+  ])
+  assert.equal(f.unrefs, 0)
+})
+
+test("事件訂閱失敗時退避重建，退避上限 60 秒", async (t) => {
+  const f = await fixture(t)
+  const original = f.event.subscribe.bind(f.event)
+  let attempts = 0
+  const waits: number[] = []
+  f.event.subscribe = (options) => {
+    attempts++
+    if (attempts <= 8) throw new Error("sensitive-subscription")
+    return original(options)
+  }
+  f.dependencies.retryWait = async (ms) => { waits.push(ms) }
+  await f.start()
+  await until(() => attempts === 9)
+  assert.deepEqual(waits, [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000])
+  assert.equal(f.logs.filter((line) => line === "認證事件訂閱失敗；將重試訂閱。").length, 8)
+  assert.doesNotMatch(f.logs.join(""), /sensitive-subscription|定期更新/)
+  await delay(20)
+  f.id = "after-reconnect"
+  f.emit("cpa")
+  await until(() => f.added()[0]?.models[0]?.id === "after-reconnect")
+})
+
+test("事件串流正常結束時不重試", async (t) => {
+  const f = await fixture(t)
+  let attempts = 0
+  f.event.subscribe = async function* () { attempts++ }
+  f.dependencies.retryWait = async () => { assert.fail("正常結束不應重試") }
+  await f.start()
+  await delay(20)
+  assert.equal(attempts, 1)
+  assert.deepEqual(f.logs, [])
+})
+
+test("cleanup 中止退避等待，不再重建事件訂閱", async (t) => {
+  const f = await fixture(t)
+  let attempts = 0
+  let waiting = false
+  let aborted = false
+  f.event.subscribe = async function* () { attempts++; throw new Error("offline") }
+  f.dependencies.retryWait = async (_ms, signal) => {
+    waiting = true
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => { aborted = true; reject(signal.reason) }, { once: true })
+    })
+  }
+  await f.start()
+  await until(() => waiting)
+  await f.stop()
+  assert.equal(aborted, true)
+  await delay(20)
+  assert.equal(attempts, 1)
+})
+
+test("cleanup 等待已開始的快取寫入，完成後不 reload", async (t) => {
+  const f = await fixture(t)
+  f.dependencies.coldStartBudgetMs = 20
+  const gate = deferred()
+  let writing = false
+  let completed = false
+  f.dependencies.writeCache = async (catalog, path) => {
+    writing = true
+    await gate.promise
+    const result = await writeCache(catalog, path)
+    completed = true
+    return result
+  }
+  await f.start()
+  assert.equal(writing, true)
+  let stopped = false
+  const stopping = f.stop().then(() => { stopped = true })
+  await delay(10)
+  assert.equal(stopped, false)
+  assert.equal(completed, false)
+  gate.resolve()
+  await stopping
+  assert.equal(completed, true)
+  assert.equal(f.reloads, 0)
+  assert.ok(await readCache(f.path))
+})
+
+test("2.1.3 adapter 使用的 Effect iterator.next 同步建立 PubSub 訂閱", async () => {
+  const bus = Effect.runSync(PubSub.unbounded<number>())
+  const iterator = Stream.toAsyncIterableWith(Stream.fromPubSub(bus), Context.empty())[Symbol.asyncIterator]()
+  try {
+    const next = iterator.next()
+    Effect.runSync(PubSub.publish(bus, 1))
+    const result = await Promise.race([next, delay(100).then(() => undefined)])
+    assert.deepEqual(result, { done: false, value: 1 })
+  } finally {
+    await iterator.return?.()
+  }
 })

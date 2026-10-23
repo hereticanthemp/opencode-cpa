@@ -76,11 +76,16 @@ CPA 端點用途：
 認證：
 - plugin 註冊 `cpa` integration，名稱為 CLIProxyAPI。支援 API key 與 `CPA_API_KEY` 環境變數。
 - opencode credential 機制負責保存與套用 key。已儲存的 credential 優先於環境變數。
+- credential 是 opencode 全域資料。integration `cpa` 只有一組 active key，所有專案共用。
+- 不同專案即使指向不同 CPA，也會使用同一組 active key。
 - session 與 stateless generation 都由 opencode 在執行時套用認證。
 - 每次更新模型列表前，plugin 都重新讀取 active connection。讀取失敗或沒有 key 時，不帶認證。
 - 新增、啟用或移除 `cpa` 的 active credential 時，plugin 會更新模型列表。
 - API key 不會進入公開模型資料、provider settings 或模型快取。
 - 沒有 CPA credential 時，opencode 不會套用 `GOOGLE_GENERATIVE_AI_API_KEY`。
+- 請勿儲存空 key。plugin 偵測到空白 key 時，會在 connection 顯示重新認證警告，並記錄固定訊息。模型列表請求不帶認證。
+- opencode v2.1.3 對「存在但 key 為空字串」的 credential 仍可能退回 `GOOGLE_GENERATIVE_AI_API_KEY`。此上游限制也影響 stateless generation。
+- UI 警告不能阻止上述 fallback。請輸入有效 key；CPA 不需要 key 時，請移除空 credential，而非儲存空字串。
 
 cache 機制：
 - cache 位置為 `$XDG_DATA_HOME/opencode-cpa/models-<source>.json`。未設定環境變數時，目錄為 `~/.local/share/opencode-cpa`。
@@ -95,8 +100,10 @@ cache 機制：
 - 有快取時立即註冊，並在背景更新。
 - 無快取時最多等待 3 秒，且不超過 `timeoutMs`。此預算包含 connection 讀取。主來源成功後可先使用預設 metadata。
 - metadata 超出啟動預算時，背景請求繼續補充資料。資料改變後會 reload provider。
-- 主來源在預算內失敗或未完成時，先註冊空 transform，再由定期更新重試。若更新間隔為 0，則不會重試。
-- 主來源失敗時中止其他請求，等請求全部結束後才允許下次更新。cleanup 也會中止進行中的請求。
+- 讀取第一次 credential 前，先啟動事件訂閱。抓取期間收到 credential 切換事件時，完成後會補一次更新。
+- 主來源在預算內失敗或未完成時，先註冊空 transform，再由定期更新或 credential 切換重試。更新間隔為 0 時，不會定期重試。
+- 事件訂閱失敗時，以 1、2、4 秒遞增退避重試，上限 60 秒。重新訂閱後會補一次更新。事件串流正常結束時不重試。
+- 主來源失敗時中止其他請求，等請求全部結束後才允許下次更新。cleanup 會中止請求與訂閱，並等待進行中的快取寫入完成。
 
 provider 套件宣告：
 - plugin 宣告的 package 為 `@opencode/ai/providers/google`。

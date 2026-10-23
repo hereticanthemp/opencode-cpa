@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode/plugin"
+import { setTimeout as delay } from "node:timers/promises"
 import { cachePath, readCache, writeCache } from "./cache.js"
 import { buildModels, buildProviderInfo, catalogFingerprint } from "./catalog.js"
 import { parseConfig, type Config } from "./config.js"
@@ -14,6 +15,7 @@ interface Dependencies {
   log?: (message: string) => void
   coldStartBudgetMs?: number
   writeCache?: typeof writeCache
+  retryWait?: (ms: number, signal: AbortSignal) => Promise<void>
 }
 
 export async function setup(ctx: Context, dependencies: Dependencies = {}): Promise<Plugin.Cleanup | void> {
@@ -38,6 +40,7 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
   let controller: AbortController | undefined
   let primary: CPACatalog | undefined
   let pendingRefresh = false
+  let writing: Promise<boolean> | undefined
   const integration = await ctx.integration.transform((editor) => {
     editor.update("cpa", (value) => { value.name = "CLIProxyAPI" })
     editor.method.update({ integrationID: "cpa", method: { type: "key", label: "CLIProxyAPI API key" } })
@@ -48,7 +51,18 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     try {
       const connection = await ctx.integration.connection.active("cpa")
       const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined
-      return credential?.type === "key" ? credential.key : undefined
+      if (disposed || !connection || credential?.type !== "key") return undefined
+      const empty = credential.key.trim() === ""
+      if (empty) log("CLIProxyAPI API key 為空；請重新輸入有效的 key。模型列表請求不帶認證。")
+      try {
+        await ctx.integration.connection.status({
+          integrationID: "cpa", connection,
+          status: empty ? { status: "needs_auth", message: "CLIProxyAPI API key is empty. Enter a valid key." } : undefined,
+        })
+      } catch {
+        // UI 狀態回報失敗不改變模型列表請求的認證判斷。
+      }
+      return empty ? undefined : credential.key
     } catch {
       return undefined
     }
@@ -79,8 +93,13 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       fingerprint = nextFingerprint
       if (disposed) return
       if (writtenFingerprint !== nextFingerprint) {
-        if (await (dependencies.writeCache ?? writeCache)(next, path)) writtenFingerprint = nextFingerprint
-        else if (!disposed) log("模型快取寫入失敗。")
+        const task = writing = (dependencies.writeCache ?? writeCache)(next, path)
+        try {
+          if (await task) writtenFingerprint = nextFingerprint
+          else if (!disposed) log("模型快取寫入失敗。")
+        } finally {
+          if (writing === task) writing = undefined
+        }
       }
       if (!disposed && (reload || registered) && changed) await ctx.provider.reload()
     } catch {
@@ -93,6 +112,46 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
       }
     }
   }
+
+  function requestRefresh(): void {
+    if (disposed) return
+    if (fetching) pendingRefresh = true
+    else void refresh(true)
+  }
+
+  const events = new AbortController()
+  const retryWait = dependencies.retryWait ?? ((ms, signal) => delay(ms, undefined, { signal }))
+  // 2.1.3 的 adapter 透過 next() 同步啟動 Effect stream 與 Bus 訂閱；subscribe() 本身是 lazy。
+  // 在第一次讀取 connection 前先呼叫 next()，不可等待第一個事件才開始讀取。
+  const watching = (async () => {
+    let backoff = 1_000
+    let retrying = false
+    while (!disposed) {
+      try {
+        const iterator = ctx.event.subscribe({ signal: events.signal })[Symbol.asyncIterator]()
+        try {
+          let next = iterator.next()
+          // 斷線期間可能遺失 credential 事件；重新訂閱後補讀一次。
+          if (retrying) requestRefresh()
+          while (!disposed) {
+            const result = await next
+            if (result.done) return
+            const event = result.value
+            if (event.type === "credential.switched" && event.data.integrationID === "cpa") requestRefresh()
+            next = iterator.next()
+          }
+        } finally {
+          await iterator.return?.()
+        }
+      } catch {
+        if (disposed) return
+        log("認證事件訂閱失敗；將重試訂閱。")
+        try { await retryWait(backoff, events.signal) } catch { return }
+        backoff = Math.min(60_000, backoff * 2)
+        retrying = true
+      }
+    }
+  })()
 
   const cached = catalog !== null
   if (!cached) {
@@ -117,19 +176,6 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     if (models.length) editor.add({ info: buildProviderInfo(config), models })
   })
   registered = true
-  const events = new AbortController()
-  void (async () => {
-    try {
-      for await (const event of ctx.event.subscribe({ signal: events.signal })) {
-        // Updated 沒有 integrationID；Switched 涵蓋新增、啟用與移除 active credential。
-        if (disposed || event.type !== "credential.switched" || event.data.integrationID !== "cpa") continue
-        if (fetching) pendingRefresh = true
-        else void refresh(true)
-      }
-    } catch {
-      if (!disposed) log("認證事件訂閱中斷；模型目錄仍會定期更新。")
-    }
-  })()
   if (cached) void refresh(true)
   const schedule = dependencies.setInterval ?? setInterval
   const cancel = dependencies.clearInterval ?? clearInterval
@@ -143,6 +189,8 @@ export async function setup(ctx: Context, dependencies: Dependencies = {}): Prom
     events.abort()
     controller?.abort()
     if (timer) cancel(timer)
+    await watching
+    await writing?.catch(() => {})
     await registration.dispose()
     await integration.dispose()
   }
